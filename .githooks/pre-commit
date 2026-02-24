@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -e
+
+echo "pre-commit: checking format..."
+rustup run nightly cargo fmt --check
+
+echo "pre-commit: running clippy..."
+cargo clippy
+
+echo "pre-commit: running tests..."
+cargo test --lib
+
+echo "pre-commit: all checks passed"

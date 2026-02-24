@@ -1,0 +1,105 @@
+[package]
+name = "xdg-desktop-portal-generic"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+license = "MIT OR Apache-2.0"
+authors = ["Greg Lamberson <greg@lamco.io>"]
+description = "Generic XDG Desktop Portal backend for Wayland compositors"
+repository = "https://github.com/lamco-admin/xdg-desktop-portal-generic"
+homepage = "https://www.lamco.ai"
+keywords = ["wayland", "portal", "generic", "flatpak", "desktop"]
+categories = ["os::unix-apis", "gui"]
+readme = "README.md"
+
+[package.metadata.docs.rs]
+all-features = true
+targets = ["x86_64-unknown-linux-gnu"]
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+# D-Bus service implementation
+zbus = { version = "5.2", features = ["tokio"] }
+zvariant = "5.2"
+
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# EIS protocol (input injection)
+reis = { version = "0.5", features = ["tokio", "calloop"] }
+
+# Wayland client (for wlr virtual input backend)
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
+
+# PipeWire (screen capture)
+pipewire = "0.8"
+libspa = "0.8"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+futures = "0.3"
+uuid = { version = "1.11", features = ["v4"] }
+
+# XKB keymap handling
+xkbcommon = { version = "0.8", features = ["wayland"] }
+
+# Image encoding (for Screenshot portal)
+png = "0.17"
+
+# System
+nix = { version = "0.29", features = ["socket", "poll", "fs", "mman", "time"] }
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3.8"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+elided_lifetimes_in_paths = "warn"
+unreachable_pub = "warn"
+
+[lints.clippy]
+pedantic = { priority = -1, level = "deny" }
+allow_attributes = "deny"
+
+# Pedantic lints that are false-positive-prone or low-value for this project
+missing_errors_doc = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+doc_markdown = "allow"
+similar_names = "allow"
+items_after_statements = "allow"
+missing_panics_doc = "allow"
+unused_async = "allow"
+struct_excessive_bools = "allow"
+
+# Wayland/D-Bus protocol code requires numeric casts extensively
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_sign_loss = "allow"
+cast_lossless = "allow"
+cast_precision_loss = "allow"
+
+# Functional lints
+wildcard_imports = "deny"
+large_futures = "warn"
+
+# Progressive (start as warn, upgrade to deny when clean)
+unwrap_used = "warn"
+expect_used = "warn"

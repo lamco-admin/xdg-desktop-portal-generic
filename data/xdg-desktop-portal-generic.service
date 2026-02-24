@@ -1,0 +1,14 @@
+[Unit]
+Description=Generic XDG Desktop Portal Backend for Wayland Compositors
+PartOf=graphical-session.target
+After=xdg-desktop-portal.service
+
+[Service]
+Type=dbus
+BusName=org.freedesktop.impl.portal.desktop.generic
+ExecStart=/usr/libexec/xdg-desktop-portal-generic
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target
