@@ -10,7 +10,11 @@ repository = "https://github.com/lamco-admin/xdg-desktop-portal-generic"
 homepage = "https://www.lamco.ai"
 keywords = ["wayland", "portal", "generic", "flatpak", "desktop"]
 categories = ["os::unix-apis", "gui"]
+documentation = "https://github.com/lamco-admin/xdg-desktop-portal-generic"
 readme = "README.md"
+
+[badges]
+maintenance = { status = "actively-developed" }
 
 [package.metadata.docs.rs]
 all-features = true

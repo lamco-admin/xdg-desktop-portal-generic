@@ -6,5 +6,5 @@
 mod manager;
 mod state;
 
-pub use manager::SessionManager;
+pub use manager::{SessionManager, SessionManagerConfig};
 pub use state::{PersistMode, RestoreData, Session, SessionState};

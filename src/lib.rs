@@ -57,6 +57,7 @@
 
 #![warn(missing_docs)]
 #![warn(clippy::all)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 pub mod dbus;
@@ -159,10 +160,6 @@ impl PortalBackend {
     ///
     /// Registers the portal interfaces, sets up client disconnect monitoring,
     /// clipboard signal bridging, and runs until the service is stopped.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "D-Bus service setup requires sequential registration of all interfaces"
-    )]
     pub async fn run(&self) -> anyhow::Result<()> {
         use dbus::{
             ClipboardInterface, ClipboardSignal, RemoteDesktopInterface, ScreenCastInterface,
@@ -363,10 +360,6 @@ impl PortalBackend {
     /// Receives `ClipboardSignal` messages from the Wayland event loop
     /// (via the `on_selection_changed` callback) and emits corresponding
     /// D-Bus signals on all clipboard-enabled sessions.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "clipboard signal bridge handles two signal variants with D-Bus emission"
-    )]
     async fn clipboard_signal_bridge(
         connection: zbus::Connection,
         session_manager: Arc<Mutex<SessionManager>>,

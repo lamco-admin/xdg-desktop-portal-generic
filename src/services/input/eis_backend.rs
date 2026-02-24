@@ -12,6 +12,14 @@
 //!
 //! The caller is responsible for forwarding the returned events to the
 //! appropriate output (e.g., wlr virtual input protocols).
+//!
+//! # Status
+//!
+//! **0.1.0:** EIS socket handling and event parsing are implemented, but the
+//! full EIS bridge mode (EIS socket on one side, wlr virtual input on the other)
+//! is not yet wired up. When EIS is selected, [`create_input_backend`](super::create_input_backend)
+//! currently falls back to the wlr backend. Direct use of [`EisInputBackend`]
+//! for custom bridge implementations is supported.
 
 use std::{
     collections::HashMap,
