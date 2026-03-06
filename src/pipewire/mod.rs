@@ -24,9 +24,10 @@ use std::{
     os::unix::io::OwnedFd,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        mpsc, Arc,
     },
     thread,
+    time::Duration,
 };
 
 pub use stream::StreamConfig;
@@ -115,8 +116,8 @@ impl std::fmt::Debug for PipeWireCommand {
 /// `pipewire::channel`, which integrates directly with the PipeWire loop's
 /// event system for zero-latency wakeups.
 pub struct PipeWireManager {
-    /// Command sender to the PipeWire thread (thread-safe, uses pipe fd).
-    command_tx: pipewire::channel::Sender<PipeWireCommand>,
+    /// Command sender to the PipeWire thread.
+    command_tx: mpsc::Sender<PipeWireCommand>,
     /// Whether the manager is running.
     running: Arc<AtomicBool>,
     /// Thread join handle.
@@ -130,14 +131,14 @@ impl PipeWireManager {
     /// then enters the event loop. Commands are processed via a
     /// `pipewire::channel` receiver attached to the main loop.
     pub fn start() -> Result<Self, PortalError> {
-        let (command_tx, command_rx) = pipewire::channel::channel::<PipeWireCommand>();
+        let (command_tx, command_rx) = mpsc::channel::<PipeWireCommand>();
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = Arc::clone(&running);
 
         let thread_handle = thread::Builder::new()
             .name("pipewire-main".to_string())
             .spawn(move || {
-                if let Err(e) = Self::run_thread(command_rx, running_clone) {
+                if let Err(e) = Self::run_thread(&command_rx, &running_clone) {
                     tracing::error!("PipeWire thread exited with error: {}", e);
                 }
             })
@@ -154,18 +155,17 @@ impl PipeWireManager {
 
     /// Run the PipeWire event loop on the dedicated thread.
     ///
-    /// Uses `pipewire::channel` to receive commands — the channel's receiver
-    /// is attached directly to the PipeWire main loop via `add_io`, so the
-    /// loop wakes up immediately when a command arrives (no polling needed).
+    /// Uses a manual iterate loop with `std::sync::mpsc` for commands.
+    /// pipewire-rs 0.9 uses lifetime-bound Box types that prevent Clone/move
+    /// into closures, so we poll for commands on each loop iteration.
     fn run_thread(
-        command_rx: pipewire::channel::Receiver<PipeWireCommand>,
-        running: Arc<AtomicBool>,
+        command_rx: &mpsc::Receiver<PipeWireCommand>,
+        running: &Arc<AtomicBool>,
     ) -> Result<(), PortalError> {
-        // MainLoop::new calls pipewire::init() internally
-        let mainloop = pipewire::main_loop::MainLoop::new(None)
+        let mainloop = pipewire::main_loop::MainLoopBox::new(None)
             .map_err(|e| PortalError::PipeWire(format!("Failed to create main loop: {e}")))?;
 
-        let context = pipewire::context::Context::new(&mainloop)
+        let context = pipewire::context::ContextBox::new(&mainloop.loop_(), None)
             .map_err(|e| PortalError::PipeWire(format!("Failed to create context: {e}")))?;
 
         let core = context.connect(None).map_err(|e| {
@@ -174,98 +174,93 @@ impl PipeWireManager {
 
         tracing::info!("Connected to PipeWire daemon");
 
-        // Track active streams by node_id.
-        // We use a RefCell because the channel callback needs mutable access to
-        // this map, but it also needs to borrow the core for stream creation.
-        use std::{cell::RefCell, rc::Rc};
-        let streams: Rc<RefCell<HashMap<u32, stream::PipeWireVideoStream>>> =
-            Rc::new(RefCell::new(HashMap::new()));
+        let mut streams: HashMap<u32, stream::PipeWireVideoStream> = HashMap::new();
 
-        // Clone references for the command callback
-        let streams_ref = Rc::clone(&streams);
-        let context_ref = context.clone();
-        let core_ref = core.clone();
-        let mainloop_quit = mainloop.clone();
-        let running_ref = running;
-
-        // Attach the command receiver to the PipeWire main loop.
-        // When a command arrives, the loop wakes up and calls this closure.
-        let _receiver = command_rx.attach(mainloop.loop_(), move |command| match command {
-            PipeWireCommand::CreateStream { config, reply } => {
-                let result = stream::PipeWireVideoStream::create(&core_ref, &config);
-                match result {
-                    Ok(pw_stream) => {
-                        let node_id = pw_stream.node_id();
-                        tracing::info!(
-                            node_id = node_id,
-                            width = config.width,
-                            height = config.height,
-                            "PipeWire stream created"
-                        );
-                        streams_ref.borrow_mut().insert(node_id, pw_stream);
-                        let _ = reply.send(Ok(node_id));
+        // Manual event loop: process PipeWire events + poll commands
+        while running.load(Ordering::Relaxed) {
+            // Process all pending commands
+            while let Ok(command) = command_rx.try_recv() {
+                match command {
+                    PipeWireCommand::CreateStream { config, reply } => {
+                        let result = stream::PipeWireVideoStream::create(&core, &config);
+                        match result {
+                            Ok(pw_stream) => {
+                                let node_id = pw_stream.node_id();
+                                tracing::info!(
+                                    node_id = node_id,
+                                    width = config.width,
+                                    height = config.height,
+                                    "PipeWire stream created"
+                                );
+                                streams.insert(node_id, pw_stream);
+                                let _ = reply.send(Ok(node_id));
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to create PipeWire stream: {}", e);
+                                let _ = reply.send(Err(e));
+                            }
+                        }
                     }
-                    Err(e) => {
-                        tracing::error!("Failed to create PipeWire stream: {}", e);
-                        let _ = reply.send(Err(e));
+
+                    PipeWireCommand::DestroyStream { node_id, reply } => {
+                        if let Some(pw_stream) = streams.remove(&node_id) {
+                            pw_stream.disconnect();
+                            tracing::info!(node_id = node_id, "PipeWire stream destroyed");
+                            let _ = reply.send(Ok(()));
+                        } else {
+                            let _ = reply.send(Err(PortalError::PipeWire(format!(
+                                "Stream not found: {node_id}"
+                            ))));
+                        }
+                    }
+
+                    PipeWireCommand::QueueBuffer {
+                        node_id,
+                        data,
+                        width,
+                        height,
+                        stride,
+                        format,
+                    } => {
+                        if let Some(pw_stream) = streams.get_mut(&node_id) {
+                            if let Err(e) =
+                                pw_stream.queue_frame(&data, width, height, stride, format)
+                            {
+                                tracing::warn!(
+                                    node_id = node_id,
+                                    error = %e,
+                                    "Failed to queue frame"
+                                );
+                            }
+                        } else {
+                            tracing::trace!(node_id = node_id, "QueueBuffer for unknown stream");
+                        }
+                    }
+
+                    PipeWireCommand::OpenRemote { reply } => {
+                        match Self::create_remote_fd(&context) {
+                            Ok(fd) => {
+                                let _ = reply.send(Ok(fd));
+                            }
+                            Err(e) => {
+                                let _ = reply.send(Err(e));
+                            }
+                        }
+                    }
+
+                    PipeWireCommand::Shutdown => {
+                        tracing::info!("PipeWire thread shutting down");
+                        running.store(false, Ordering::Relaxed);
                     }
                 }
             }
 
-            PipeWireCommand::DestroyStream { node_id, reply } => {
-                if let Some(pw_stream) = streams_ref.borrow_mut().remove(&node_id) {
-                    pw_stream.disconnect();
-                    tracing::info!(node_id = node_id, "PipeWire stream destroyed");
-                    let _ = reply.send(Ok(()));
-                } else {
-                    let _ = reply.send(Err(PortalError::PipeWire(format!(
-                        "Stream not found: {node_id}"
-                    ))));
-                }
-            }
+            // Run one PipeWire main loop iteration (process stream events)
+            mainloop.loop_().iterate(Duration::from_millis(10));
+        }
 
-            PipeWireCommand::QueueBuffer {
-                node_id,
-                data,
-                width,
-                height,
-                stride,
-                format,
-            } => {
-                if let Some(pw_stream) = streams_ref.borrow_mut().get_mut(&node_id) {
-                    if let Err(e) = pw_stream.queue_frame(&data, width, height, stride, format) {
-                        tracing::warn!(
-                            node_id = node_id,
-                            error = %e,
-                            "Failed to queue frame"
-                        );
-                    }
-                } else {
-                    tracing::trace!(node_id = node_id, "QueueBuffer for unknown stream");
-                }
-            }
-
-            PipeWireCommand::OpenRemote { reply } => match Self::create_remote_fd(&context_ref) {
-                Ok(fd) => {
-                    let _ = reply.send(Ok(fd));
-                }
-                Err(e) => {
-                    let _ = reply.send(Err(e));
-                }
-            },
-
-            PipeWireCommand::Shutdown => {
-                tracing::info!("PipeWire thread shutting down");
-                running_ref.store(false, Ordering::Relaxed);
-                mainloop_quit.quit();
-            }
-        });
-
-        // Run the main loop — blocks until quit() is called
-        mainloop.run();
-
-        // Clean up all streams
-        for (node_id, pw_stream) in streams.borrow_mut().drain() {
+        // Clean up all streams before dropping core/context
+        for (node_id, pw_stream) in streams.drain() {
             pw_stream.disconnect();
             tracing::debug!(node_id = node_id, "Cleaned up PipeWire stream on shutdown");
         }
@@ -278,7 +273,9 @@ impl PipeWireManager {
     ///
     /// This creates a new context connection that the portal client can use
     /// to access the portal's PipeWire stream nodes.
-    fn create_remote_fd(context: &pipewire::context::Context) -> Result<OwnedFd, PortalError> {
+    fn create_remote_fd(
+        context: &pipewire::context::ContextBox<'_>,
+    ) -> Result<OwnedFd, PortalError> {
         // Create a socket pair — one end for the new PipeWire connection,
         // the other returned to the client.
         let (server_socket, client_socket) = {

@@ -24,12 +24,14 @@
 
 mod detection;
 mod eis_backend;
+mod eis_bridge;
 mod wlr_backend;
 
 use std::{os::unix::io::OwnedFd, path::PathBuf};
 
 pub use detection::{AvailableProtocols, ProtocolDetector};
-pub use eis_backend::EisInputBackend;
+pub use eis_backend::EisSession;
+pub use eis_bridge::EisBridgeBackend;
 pub use wlr_backend::WlrInputBackend;
 
 use crate::{
@@ -260,16 +262,15 @@ pub fn create_input_backend(
 
     match protocol {
         InputProtocol::Eis => {
-            // EIS bridge mode: EIS socket on one side, wlr virtual input on the other.
+            // EIS bridge mode: accept EIS connections from clients, forward
+            // events to the compositor through wlr virtual input protocols.
             if !wayland_protocols.wlr_virtual_pointer && !wayland_protocols.zwp_virtual_keyboard {
                 return Err(crate::error::PortalError::Config(
                     "EIS bridge mode requires wlr virtual input protocols".to_string(),
                 ));
             }
-            // For now, fall through to wlr backend since pure EIS bridge
-            // requires additional implementation
-            tracing::info!("EIS bridge mode not yet implemented, using wlr backend");
-            let backend = WlrInputBackend::new(&config.wlr)?;
+            tracing::info!("Using EIS bridge backend (EIS server -> wlr virtual input)");
+            let backend = EisBridgeBackend::new(&config.wlr)?;
             Ok(Box::new(backend))
         }
         InputProtocol::WlrVirtualInput => {

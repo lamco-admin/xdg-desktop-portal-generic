@@ -1,552 +1,297 @@
 //! EIS (Emulated Input Server) input backend.
 //!
-//! This backend uses the `reis` crate to implement the EIS protocol,
-//! which is the emerging freedesktop standard for input emulation.
+//! This backend uses the `reis` crate's high-level `request` module to implement
+//! a full EIS server. Clients connect via a Unix socket pair and send input events
+//! using the libei protocol. The server handles handshake, device setup, and event
+//! conversion.
 //!
 //! # How It Works
 //!
-//! 1. Portal creates a Unix socket pair
-//! 2. Portal keeps one end, passes the other to the client via D-Bus
-//! 3. Client sends input events over the socket using libei
-//! 4. Portal reads events via `process_events()` and returns them
-//!
-//! The caller is responsible for forwarding the returned events to the
-//! appropriate output (e.g., wlr virtual input protocols).
+//! 1. Portal creates a Unix socket pair via [`EisSession::new`]
+//! 2. Client end is returned to caller (passed via D-Bus `ConnectToEIS`)
+//! 3. Client performs EIS handshake (version, interfaces, context type)
+//! 4. Server completes handshake, creates seat + device with requested capabilities
+//! 5. Client sends input events; server converts them via `EisRequestConverter`
+//! 6. Caller retrieves high-level `EisRequest` events from [`EisSession::process`]
 //!
 //! # Status
 //!
-//! **0.1.0:** EIS socket handling and event parsing are implemented, but the
-//! full EIS bridge mode (EIS socket on one side, wlr virtual input on the other)
-//! is not yet wired up. When EIS is selected, [`create_input_backend`](super::create_input_backend)
-//! currently falls back to the wlr backend. Direct use of [`EisInputBackend`]
-//! for custom bridge implementations is supported.
+//! **0.2.0:** Full EIS server using reis 0.6 high-level API. Proper handshake with
+//! interface negotiation, automatic frame batching, touch tracking, and serial
+//! management. Used by [`super::eis_bridge::EisBridgeBackend`] for forwarding
+//! events to wlr virtual input protocols.
 
-use std::{
-    collections::HashMap,
-    os::unix::{
-        io::{AsRawFd, FromRawFd, OwnedFd},
-        net::UnixStream,
-    },
+use std::os::unix::{
+    io::{AsRawFd, FromRawFd, OwnedFd},
+    net::UnixStream,
 };
 
-use reis::{eis, PendingRequestResult};
+use enumflags2::BitFlags;
+use reis::{
+    eis,
+    handshake::{EisHandshakeResp, EisHandshaker},
+    request::{Device, DeviceCapability, EisRequest, EisRequestConverter, Seat},
+    PendingRequestResult,
+};
 
-use super::{EisConfig, InputBackend, InputProtocol};
 use crate::{
     error::{PortalError, Result},
-    types::{
-        ButtonState, DeviceTypes, InputEvent, KeyState, KeyboardEvent, PointerEvent, ScrollAxis,
-        TouchEvent,
-    },
+    types::DeviceTypes,
 };
 
-/// EIS-based input backend.
+/// Per-session EIS state.
 ///
-/// Implements the [`InputBackend`] trait using the EIS (Emulated Input Server) protocol.
-/// Clients connect to a Unix socket and send input events, which are parsed and returned
-/// via [`InputBackend::process_events()`].
-pub struct EisInputBackend {
-    /// Active EIS contexts by session ID.
-    contexts: HashMap<String, EisSessionContext>,
-}
-
-/// An EIS context for a single session.
-struct EisSessionContext {
-    /// The underlying EIS context.
+/// Each session gets its own Unix socket pair, handshake state machine,
+/// and request converter. The session progresses through phases:
+/// `AwaitingHandshake` -> `Active` -> dropped.
+pub struct EisSession {
+    /// The raw EIS context wrapping the server-side socket.
     context: eis::Context,
-    /// Whether the handshake is complete.
-    handshake_complete: bool,
+    /// Session phase.
+    phase: SessionPhase,
 }
 
-impl EisInputBackend {
-    /// Create a new EIS input backend.
-    pub fn new(_config: &EisConfig) -> Result<Self> {
-        tracing::info!("Initializing EIS input backend");
-
-        Ok(Self {
-            contexts: HashMap::new(),
-        })
-    }
-
-    /// Process events for a specific session.
-    fn process_session_events(&mut self, session_id: &str) -> Result<Vec<InputEvent>> {
-        let context = self
-            .contexts
-            .get_mut(session_id)
-            .ok_or_else(|| PortalError::SessionNotFound(session_id.to_string()))?;
-
-        let mut events = Vec::new();
-
-        // Read any pending data
-        match context.context.read() {
-            Ok(0) => return Ok(events),
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(events),
-            Err(e) => {
-                return Err(PortalError::EisCreationFailed(format!(
-                    "Failed to read from EIS socket: {e}"
-                )));
-            }
-        }
-
-        // Process pending requests
-        while let Some(result) = context.context.pending_request() {
-            match result {
-                PendingRequestResult::Request(request) => {
-                    if let Some(event) =
-                        Self::handle_request(&mut context.handshake_complete, request)
-                    {
-                        events.push(event);
-                    }
-                }
-                PendingRequestResult::ParseError(e) => {
-                    tracing::warn!("EIS parse error: {:?}", e);
-                }
-                PendingRequestResult::InvalidObject(id) => {
-                    tracing::warn!("EIS invalid object ID: {}", id);
-                }
-            }
-        }
-
-        // Flush any outgoing messages
-        let _ = context.context.flush();
-
-        Ok(events)
-    }
-
-    /// Handle an EIS protocol request, returning an input event if applicable.
-    fn handle_request(handshake_complete: &mut bool, request: eis::Request) -> Option<InputEvent> {
-        use eis::Request;
-
-        match request {
-            Request::Handshake(_, handshake_req) => {
-                Self::handle_handshake(handshake_complete, handshake_req);
-                None
-            }
-            Request::Connection(_, ref conn_req) => {
-                Self::handle_connection_request(conn_req);
-                None
-            }
-            Request::Seat(_, ref seat_req) => {
-                Self::handle_seat_request(seat_req);
-                None
-            }
-            Request::Device(_, ref device_req) => {
-                Self::handle_device_request(device_req);
-                None
-            }
-            Request::Keyboard(_, ref kb_req) => Self::handle_keyboard_request(kb_req),
-            Request::Pointer(_, ref ptr_req) => Self::handle_pointer_request(ptr_req),
-            Request::PointerAbsolute(_, ref ptr_req) => {
-                Self::handle_pointer_absolute_request(ptr_req)
-            }
-            Request::Scroll(_, ref scroll_req) => Self::handle_scroll_request(scroll_req),
-            Request::Button(_, ref btn_req) => Self::handle_button_request(btn_req),
-            Request::Touchscreen(_, ref touch_req) => Self::handle_touch_request(touch_req),
-            Request::Callback(_, _) | Request::Pingpong(_, _) => None,
-            _ => {
-                tracing::trace!("Unhandled EIS request type");
-                None
-            }
-        }
-    }
-
-    fn handle_handshake(handshake_complete: &mut bool, request: eis::handshake::Request) {
-        use eis::handshake::Request;
-
-        match request {
-            Request::HandshakeVersion { version } => {
-                tracing::debug!(version = version, "EIS handshake version");
-            }
-            Request::ContextType { .. } => {
-                tracing::debug!("EIS context type received");
-            }
-            Request::Name { name } => {
-                tracing::debug!(name = %name, "EIS client name");
-            }
-            Request::InterfaceVersion { .. } => {
-                tracing::trace!("EIS interface version negotiation");
-            }
-            Request::Finish => {
-                tracing::debug!("EIS handshake finished");
-                *handshake_complete = true;
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_connection_request(request: &eis::connection::Request) {
-        use eis::connection::Request;
-
-        match request {
-            Request::Disconnect => {
-                tracing::debug!("EIS client disconnected");
-            }
-            Request::Sync { .. } => {
-                tracing::trace!("EIS sync request");
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_seat_request(request: &eis::seat::Request) {
-        use eis::seat::Request;
-
-        match request {
-            Request::Bind { capabilities } => {
-                tracing::debug!(capabilities = capabilities, "EIS seat bind request");
-            }
-            Request::Release => {
-                tracing::debug!("EIS seat release");
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_device_request(request: &eis::device::Request) {
-        use eis::device::Request;
-
-        match request {
-            Request::Release => {
-                tracing::debug!("EIS device release");
-            }
-            Request::StartEmulating {
-                last_serial,
-                sequence,
-            } => {
-                tracing::debug!(
-                    last_serial = last_serial,
-                    sequence = sequence,
-                    "EIS start emulating"
-                );
-            }
-            Request::StopEmulating { last_serial } => {
-                tracing::debug!(last_serial = last_serial, "EIS stop emulating");
-            }
-            Request::Frame {
-                last_serial,
-                timestamp,
-            } => {
-                tracing::trace!(
-                    last_serial = last_serial,
-                    timestamp = timestamp,
-                    "EIS frame"
-                );
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_keyboard_request(request: &eis::keyboard::Request) -> Option<InputEvent> {
-        use eis::keyboard::Request;
-        use reis::eis::keyboard::KeyState as EisKeyState;
-
-        match request {
-            Request::Key { key, state } => {
-                let key_state = match state {
-                    EisKeyState::Press => KeyState::Pressed,
-                    EisKeyState::Released => KeyState::Released,
-                };
-
-                let event = InputEvent::Keyboard(KeyboardEvent {
-                    keycode: *key,
-                    state: key_state,
-                    time_usec: current_time_usec(),
-                });
-
-                tracing::trace!(key = key, state = ?key_state, "EIS keyboard event");
-                Some(event)
-            }
-            Request::Release => {
-                tracing::debug!("EIS keyboard release");
-                None
-            }
-            _ => None,
-        }
-    }
-
-    fn handle_pointer_request(request: &eis::pointer::Request) -> Option<InputEvent> {
-        use eis::pointer::Request;
-
-        match request {
-            Request::MotionRelative { x, y } => {
-                let event = InputEvent::Pointer(PointerEvent::Motion {
-                    dx: f64::from(*x),
-                    dy: f64::from(*y),
-                    time_usec: current_time_usec(),
-                });
-
-                tracing::trace!(dx = x, dy = y, "EIS pointer motion");
-                Some(event)
-            }
-            Request::Release => {
-                tracing::debug!("EIS pointer release");
-                None
-            }
-            _ => None,
-        }
-    }
-
-    fn handle_pointer_absolute_request(
-        request: &eis::pointer_absolute::Request,
-    ) -> Option<InputEvent> {
-        use eis::pointer_absolute::Request;
-
-        match request {
-            Request::MotionAbsolute { x, y } => {
-                let event = InputEvent::Pointer(PointerEvent::MotionAbsolute {
-                    x: f64::from(*x),
-                    y: f64::from(*y),
-                    stream: 0,
-                    time_usec: current_time_usec(),
-                });
-
-                tracing::trace!(x = x, y = y, "EIS absolute pointer motion");
-                Some(event)
-            }
-            Request::Release => {
-                tracing::debug!("EIS pointer absolute release");
-                None
-            }
-            _ => None,
-        }
-    }
-
-    fn handle_scroll_request(request: &eis::scroll::Request) -> Option<InputEvent> {
-        use eis::scroll::Request;
-
-        match request {
-            Request::Scroll { x, y } => {
-                let event = InputEvent::Pointer(PointerEvent::Scroll {
-                    dx: f64::from(*x),
-                    dy: f64::from(*y),
-                    time_usec: current_time_usec(),
-                });
-
-                tracing::trace!(x = x, y = y, "EIS scroll");
-                Some(event)
-            }
-            Request::ScrollDiscrete { x, y } => {
-                // For discrete scroll, prefer vertical if both are set
-                let event = if *y != 0 {
-                    InputEvent::Pointer(PointerEvent::ScrollDiscrete {
-                        axis: ScrollAxis::Vertical,
-                        steps: *y,
-                        time_usec: current_time_usec(),
-                    })
-                } else {
-                    InputEvent::Pointer(PointerEvent::ScrollDiscrete {
-                        axis: ScrollAxis::Horizontal,
-                        steps: *x,
-                        time_usec: current_time_usec(),
-                    })
-                };
-
-                tracing::trace!(x = x, y = y, "EIS discrete scroll");
-                Some(event)
-            }
-            Request::ScrollStop { .. } => {
-                tracing::trace!("EIS scroll stop");
-                None
-            }
-            Request::Release => {
-                tracing::debug!("EIS scroll release");
-                None
-            }
-            _ => None,
-        }
-    }
-
-    fn handle_button_request(request: &eis::button::Request) -> Option<InputEvent> {
-        use eis::button::Request;
-        use reis::eis::button::ButtonState as EisButtonState;
-
-        match request {
-            Request::Button { button, state } => {
-                let button_state = match state {
-                    EisButtonState::Press => ButtonState::Pressed,
-                    EisButtonState::Released => ButtonState::Released,
-                };
-
-                let event = InputEvent::Pointer(PointerEvent::Button {
-                    button: *button,
-                    state: button_state,
-                    time_usec: current_time_usec(),
-                });
-
-                tracing::trace!(button = button, state = ?button_state, "EIS button");
-                Some(event)
-            }
-            Request::Release => {
-                tracing::debug!("EIS button release");
-                None
-            }
-            _ => None,
-        }
-    }
-
-    fn handle_touch_request(request: &eis::touchscreen::Request) -> Option<InputEvent> {
-        use eis::touchscreen::Request;
-
-        match request {
-            Request::Down { touchid, x, y } => {
-                let event = InputEvent::Touch(TouchEvent::Down {
-                    id: *touchid as i32,
-                    x: f64::from(*x),
-                    y: f64::from(*y),
-                    stream: 0,
-                    time_usec: current_time_usec(),
-                });
-
-                tracing::trace!(id = touchid, x = x, y = y, "EIS touch down");
-                Some(event)
-            }
-            Request::Motion { touchid, x, y } => {
-                let event = InputEvent::Touch(TouchEvent::Motion {
-                    id: *touchid as i32,
-                    x: f64::from(*x),
-                    y: f64::from(*y),
-                    stream: 0,
-                    time_usec: current_time_usec(),
-                });
-
-                tracing::trace!(id = touchid, x = x, y = y, "EIS touch motion");
-                Some(event)
-            }
-            Request::Up { touchid } => {
-                let event = InputEvent::Touch(TouchEvent::Up {
-                    id: *touchid as i32,
-                    time_usec: current_time_usec(),
-                });
-
-                tracing::trace!(id = touchid, "EIS touch up");
-                Some(event)
-            }
-            Request::Release => {
-                tracing::debug!("EIS touchscreen release");
-                None
-            }
-            _ => None,
-        }
-    }
+enum SessionPhase {
+    /// Handshake in progress. Client hasn't sent Finish yet.
+    AwaitingHandshake {
+        handshaker: EisHandshaker,
+        capabilities: BitFlags<DeviceCapability>,
+    },
+    /// Handshake complete, actively processing events.
+    Active {
+        converter: EisRequestConverter,
+        #[expect(dead_code, reason = "seat must stay alive while session is active")]
+        seat: Seat,
+        #[expect(
+            dead_code,
+            reason = "device must stay alive for EIS protocol lifecycle"
+        )]
+        device: Device,
+    },
 }
 
-impl InputBackend for EisInputBackend {
-    fn protocol_type(&self) -> InputProtocol {
-        InputProtocol::Eis
-    }
-
-    fn create_context(
-        &mut self,
-        session_id: &str,
-        devices: DeviceTypes,
-    ) -> Result<Option<OwnedFd>> {
-        tracing::debug!(
-            session_id = %session_id,
-            device_types = ?devices,
-            "Creating EIS context"
-        );
-
-        if self.contexts.contains_key(session_id) {
-            return Err(PortalError::InvalidSession(format!(
-                "EIS context already exists for session {session_id}"
-            )));
-        }
-
-        // Create a Unix socket pair
+impl EisSession {
+    /// Create a new EIS session, returning the session and the client-side socket fd.
+    ///
+    /// The caller should pass the returned `OwnedFd` to the client via D-Bus
+    /// (the `ConnectToEIS` method).
+    pub fn new(device_types: DeviceTypes) -> Result<(Self, OwnedFd)> {
         let (server_socket, client_socket) = UnixStream::pair().map_err(|e| {
             PortalError::EisCreationFailed(format!("Failed to create socket pair: {e}"))
         })?;
 
-        // Set non-blocking for async operation
-        server_socket.set_nonblocking(true).map_err(|e| {
-            PortalError::EisCreationFailed(format!("Failed to set non-blocking: {e}"))
-        })?;
-
-        // Create the EIS context from the server socket
         let eis_context = eis::Context::new(server_socket).map_err(|e| {
             PortalError::EisCreationFailed(format!("Failed to create EIS context: {e}"))
         })?;
 
-        // Convert client socket to OwnedFd
-        // SAFETY: client_socket is a valid Unix socket from UnixStream::pair()
+        // Convert client socket to OwnedFd without double-close
         #[expect(unsafe_code, reason = "OwnedFd::from_raw_fd requires unsafe FFI")]
         let client_fd = unsafe { OwnedFd::from_raw_fd(client_socket.as_raw_fd()) };
-        std::mem::forget(client_socket); // Prevent double-close
+        std::mem::forget(client_socket);
 
-        let context = EisSessionContext {
+        let capabilities = device_types_to_capabilities(device_types);
+
+        // Start the server-side handshake. This sends handshake_version(1)
+        // to the client immediately.
+        let handshaker = EisHandshaker::new(&eis_context, 1);
+
+        let session = Self {
             context: eis_context,
-            handshake_complete: false,
+            phase: SessionPhase::AwaitingHandshake {
+                handshaker,
+                capabilities,
+            },
         };
 
-        self.contexts.insert(session_id.to_string(), context);
-
-        tracing::info!(session_id = %session_id, "EIS context created");
-
-        Ok(Some(client_fd))
+        Ok((session, client_fd))
     }
 
-    fn destroy_context(&mut self, session_id: &str) -> Result<()> {
-        if self.contexts.remove(session_id).is_some() {
-            tracing::info!(session_id = %session_id, "EIS context destroyed");
+    /// Process pending data on the EIS socket.
+    ///
+    /// Returns a list of high-level `EisRequest` events ready for consumption.
+    /// The caller is responsible for converting these to `InputEvent` and
+    /// forwarding them (e.g., to a wlr backend).
+    ///
+    /// During the handshake phase, this drives the handshake state machine.
+    /// Once the handshake completes, a seat and device are created automatically.
+    pub fn process(&mut self) -> Result<Vec<EisRequest>> {
+        // Read any pending data from the socket
+        match self.context.read() {
+            Ok(0) => return Ok(vec![]),
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(vec![]),
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                tracing::debug!("EIS client disconnected (EOF)");
+                return Ok(vec![EisRequest::Disconnect]);
+            }
+            Err(e) => {
+                return Err(PortalError::EisCreationFailed(format!(
+                    "EIS socket read error: {e}"
+                )));
+            }
         }
-        Ok(())
+
+        match &mut self.phase {
+            SessionPhase::AwaitingHandshake { .. } => self.process_handshake(),
+            SessionPhase::Active { converter, .. } => {
+                Ok(Self::process_active(&self.context, converter))
+            }
+        }
     }
 
-    fn inject_event(&mut self, _session_id: &str, _event: InputEvent) -> Result<()> {
-        // For EIS, events come from the client via socket, not from D-Bus calls
-        tracing::trace!("inject_event called on EIS backend (no-op, events come from socket)");
-        Ok(())
-    }
+    /// Drive the handshake state machine.
+    fn process_handshake(&mut self) -> Result<Vec<EisRequest>> {
+        // We need to temporarily take ownership to transition phases
+        let SessionPhase::AwaitingHandshake {
+            handshaker,
+            capabilities,
+        } = &mut self.phase
+        else {
+            unreachable!("called process_handshake in non-handshake phase");
+        };
 
-    fn process_events(&mut self) -> Result<Vec<(String, InputEvent)>> {
-        let mut all_events = Vec::new();
+        while let Some(result) = self.context.pending_request() {
+            let request = match result {
+                PendingRequestResult::Request(r) => r,
+                PendingRequestResult::ParseError(e) => {
+                    tracing::warn!("EIS handshake parse error: {e:?}");
+                    continue;
+                }
+                PendingRequestResult::InvalidObject(id) => {
+                    tracing::warn!("EIS handshake invalid object: {id}");
+                    continue;
+                }
+            };
 
-        let session_ids: Vec<String> = self.contexts.keys().cloned().collect();
-        for session_id in session_ids {
-            match self.process_session_events(&session_id) {
-                Ok(events) => {
-                    for event in events {
-                        all_events.push((session_id.clone(), event));
-                    }
+            match handshaker.handle_request(request) {
+                Ok(Some(resp)) => {
+                    // Handshake complete -- transition to active phase
+                    let caps = *capabilities;
+                    self.transition_to_active(resp, caps);
+                    return Ok(vec![]);
+                }
+                Ok(None) => {
+                    // Handshake still in progress
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        session_id = %session_id,
-                        error = %e,
-                        "Error processing EIS events"
-                    );
+                    tracing::warn!("EIS handshake error: {e}");
+                    return Err(PortalError::EisCreationFailed(format!(
+                        "Handshake failed: {e}"
+                    )));
                 }
             }
         }
 
-        Ok(all_events)
+        let _ = self.context.flush();
+        Ok(vec![])
     }
 
-    fn has_context(&self, session_id: &str) -> bool {
-        self.contexts.contains_key(session_id)
+    /// Transition from handshake to active phase.
+    ///
+    /// Creates the request converter, adds a seat with the requested capabilities,
+    /// adds a device on that seat, and resumes it to signal readiness.
+    fn transition_to_active(
+        &mut self,
+        resp: EisHandshakeResp,
+        capabilities: BitFlags<DeviceCapability>,
+    ) {
+        tracing::info!(
+            client_name = ?resp.name,
+            context_type = ?resp.context_type,
+            interfaces = ?resp.negotiated_interfaces.keys().collect::<Vec<_>>(),
+            "EIS handshake complete"
+        );
+
+        let converter = EisRequestConverter::new(&self.context, resp, 1);
+        let connection = converter.handle().clone();
+
+        // Add a seat with the requested capabilities
+        let seat = connection.add_seat(Some("portal-input"), capabilities);
+
+        // Add a device on the seat with all requested capabilities
+        let device = seat.add_device(
+            Some("portal-device"),
+            eis::device::DeviceType::Virtual,
+            capabilities,
+            |_device| {
+                // Could set keymap here for keyboard devices via
+                // device.device().keyboard().keymap(...) if needed.
+                // For now, the client handles its own keymap.
+            },
+        );
+
+        // Signal to the client that the device is ready for emulation
+        device.resumed();
+
+        // Flush the seat/device/resumed events to the client
+        let _ = self.context.flush();
+
+        tracing::debug!("EIS session active, device resumed");
+
+        self.phase = SessionPhase::Active {
+            converter,
+            seat,
+            device,
+        };
     }
 
-    fn context_count(&self) -> usize {
-        self.contexts.len()
+    /// Process events in the active phase.
+    fn process_active(
+        context: &eis::Context,
+        converter: &mut EisRequestConverter,
+    ) -> Vec<EisRequest> {
+        let mut events = Vec::new();
+
+        while let Some(result) = context.pending_request() {
+            let request = match result {
+                PendingRequestResult::Request(r) => r,
+                PendingRequestResult::ParseError(e) => {
+                    tracing::warn!("EIS parse error: {e:?}");
+                    continue;
+                }
+                PendingRequestResult::InvalidObject(id) => {
+                    tracing::warn!("EIS invalid object: {id}");
+                    continue;
+                }
+            };
+
+            if let Err(e) = converter.handle_request(request) {
+                tracing::warn!("EIS request handling error: {e}");
+                continue;
+            }
+
+            // Drain any converted high-level requests
+            while let Some(eis_request) = converter.next_request() {
+                events.push(eis_request);
+            }
+        }
+
+        let _ = context.flush();
+        events
     }
 
-    fn keysym_to_keycode(&self, _keysym: u32) -> Option<u32> {
-        // EIS sends keycodes directly from the client — keysym conversion
-        // is not needed since the client handles keymap negotiation.
-        None
+    /// Check if the handshake is complete and the session is active.
+    pub fn is_active(&self) -> bool {
+        matches!(self.phase, SessionPhase::Active { .. })
     }
 }
 
-/// Get current monotonic time in microseconds.
-///
-/// EIS protocol timestamps must use `CLOCK_MONOTONIC`, not wall clock time.
-/// Wall clock time (`SystemTime`) can jump on NTP sync or suspend/resume,
-/// which would cause input event timing anomalies.
-fn current_time_usec() -> u64 {
-    let ts = nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC)
-        .expect("CLOCK_MONOTONIC should always be available");
-    ts.tv_sec() as u64 * 1_000_000 + ts.tv_nsec() as u64 / 1_000
+/// Convert our `DeviceTypes` to reis `DeviceCapability` bitflags.
+fn device_types_to_capabilities(devices: DeviceTypes) -> BitFlags<DeviceCapability> {
+    let mut caps = BitFlags::empty();
+    if devices.pointer {
+        caps |= DeviceCapability::Pointer;
+        caps |= DeviceCapability::PointerAbsolute;
+        caps |= DeviceCapability::Button;
+        caps |= DeviceCapability::Scroll;
+    }
+    if devices.keyboard {
+        caps |= DeviceCapability::Keyboard;
+    }
+    if devices.touchscreen {
+        caps |= DeviceCapability::Touch;
+    }
+    caps
 }
 
 #[cfg(test)]
@@ -554,54 +299,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_eis_backend_create_context() {
-        let mut backend = EisInputBackend::new(&EisConfig::default()).unwrap();
-
-        let fd = backend
-            .create_context("session-1", DeviceTypes::all())
-            .unwrap();
-
-        assert!(fd.is_some());
-        assert!(backend.has_context("session-1"));
-        assert_eq!(backend.context_count(), 1);
+    fn test_device_types_to_capabilities() {
+        let all = DeviceTypes::all();
+        let caps = device_types_to_capabilities(all);
+        assert!(caps.contains(DeviceCapability::Pointer));
+        assert!(caps.contains(DeviceCapability::PointerAbsolute));
+        assert!(caps.contains(DeviceCapability::Keyboard));
+        assert!(caps.contains(DeviceCapability::Touch));
+        assert!(caps.contains(DeviceCapability::Button));
+        assert!(caps.contains(DeviceCapability::Scroll));
     }
 
     #[test]
-    fn test_eis_backend_destroy_context() {
-        let mut backend = EisInputBackend::new(&EisConfig::default()).unwrap();
-
-        backend
-            .create_context("session-1", DeviceTypes::all())
-            .unwrap();
-        assert!(backend.has_context("session-1"));
-
-        backend.destroy_context("session-1").unwrap();
-        assert!(!backend.has_context("session-1"));
-        assert_eq!(backend.context_count(), 0);
+    fn test_device_types_keyboard_only() {
+        let kb = DeviceTypes {
+            keyboard: true,
+            pointer: false,
+            touchscreen: false,
+        };
+        let caps = device_types_to_capabilities(kb);
+        assert!(caps.contains(DeviceCapability::Keyboard));
+        assert!(!caps.contains(DeviceCapability::Pointer));
+        assert!(!caps.contains(DeviceCapability::Touch));
     }
 
     #[test]
-    fn test_eis_backend_duplicate_context_fails() {
-        let mut backend = EisInputBackend::new(&EisConfig::default()).unwrap();
-
-        backend
-            .create_context("session-1", DeviceTypes::all())
-            .unwrap();
-
-        let result = backend.create_context("session-1", DeviceTypes::all());
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_eis_backend_protocol_type() {
-        let backend = EisInputBackend::new(&EisConfig::default()).unwrap();
-
-        assert_eq!(backend.protocol_type(), InputProtocol::Eis);
-    }
-
-    #[test]
-    fn test_current_time_usec() {
-        let time = current_time_usec();
-        assert!(time > 0);
+    fn test_eis_session_creation() {
+        let (session, fd) = EisSession::new(DeviceTypes::all()).unwrap();
+        assert!(!session.is_active());
+        // fd should be valid
+        assert!(fd.as_raw_fd() >= 0);
     }
 }

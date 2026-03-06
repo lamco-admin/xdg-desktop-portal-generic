@@ -7,7 +7,7 @@
 
 use pipewire::{
     properties::properties,
-    stream::{Stream, StreamFlags},
+    stream::{StreamBox, StreamFlags},
 };
 
 use crate::error::PortalError;
@@ -32,7 +32,10 @@ pub struct StreamConfig {
 /// screen capture frames.
 pub struct PipeWireVideoStream {
     /// The underlying PipeWire stream.
-    stream: Stream,
+    // SAFETY: StreamBox borrows from CoreBox, but we ensure streams are destroyed
+    // before the core in run_thread() cleanup. The 'static is a lifetime erasure
+    // needed because we store streams in a HashMap that outlives the borrow scope.
+    stream: StreamBox<'static>,
     /// The PipeWire node ID assigned to this stream.
     node_id: u32,
 }
@@ -42,13 +45,16 @@ impl PipeWireVideoStream {
     ///
     /// The stream is created with `media.class=Video/Source` and connected
     /// as an output direction with `ALLOC_BUFFERS` flag.
-    pub fn create(core: &pipewire::core::Core, config: &StreamConfig) -> Result<Self, PortalError> {
+    pub fn create(
+        core: &pipewire::core::CoreBox<'_>,
+        config: &StreamConfig,
+    ) -> Result<Self, PortalError> {
         let source_id = config.source_id;
         let node_name = format!("xdp-capture-{source_id}");
         let node_desc = format!("Screen Capture Source {source_id}");
 
         // Create stream with media properties identifying it as a video source
-        let stream = Stream::new(
+        let stream = StreamBox::new(
             core,
             "xdp-screen-capture",
             properties! {
@@ -60,6 +66,15 @@ impl PipeWireVideoStream {
             },
         )
         .map_err(|e| PortalError::PipeWire(format!("Failed to create stream: {e}")))?;
+
+        // SAFETY: Erase lifetime to 'static. The stream is stored in a HashMap
+        // alongside the core. Streams are always destroyed before the core in
+        // run_thread() cleanup, maintaining the borrow invariant.
+        #[expect(
+            unsafe_code,
+            reason = "lifetime erasure for HashMap storage; drop order enforced"
+        )]
+        let stream: StreamBox<'static> = unsafe { std::mem::transmute(stream) };
 
         // Build the SPA video format parameter for the stream.
         let format_pod_bytes =

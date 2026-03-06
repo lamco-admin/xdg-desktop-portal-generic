@@ -19,6 +19,6 @@ pub mod input;
 
 // Re-export input backend types
 pub use input::{
-    create_input_backend, AvailableProtocols, EisConfig, EisInputBackend, InputBackend,
-    InputBackendConfig, InputProtocol, ProtocolDetector, WlrConfig, WlrInputBackend,
+    create_input_backend, AvailableProtocols, EisBridgeBackend, EisConfig, EisSession,
+    InputBackend, InputBackendConfig, InputProtocol, ProtocolDetector, WlrConfig, WlrInputBackend,
 };

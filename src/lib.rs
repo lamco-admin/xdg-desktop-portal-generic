@@ -80,8 +80,9 @@ pub use services::capture::CaptureBackend;
 pub use services::{
     clipboard::ClipboardBackend,
     input::{
-        create_input_backend, AvailableProtocols, EisConfig, EisInputBackend, InputBackend,
-        InputBackendConfig, InputProtocol, ProtocolDetector, WlrConfig, WlrInputBackend,
+        create_input_backend, AvailableProtocols, EisBridgeBackend, EisConfig, EisSession,
+        InputBackend, InputBackendConfig, InputProtocol, ProtocolDetector, WlrConfig,
+        WlrInputBackend,
     },
 };
 pub use session::{PersistMode, RestoreData, Session, SessionManager, SessionState};
