@@ -343,7 +343,20 @@ impl DataControlState {
     pub fn on_source_send(&self, mime_type: &str, fd: OwnedFd) {
         use std::io::Write;
 
-        if let Some(data) = self.source_data.get(mime_type) {
+        // Try exact match first, then fall back to base MIME type without
+        // parameters (e.g., "text/plain;charset=utf-8" → "text/plain").
+        // Compositors commonly request charset variants of text MIME types.
+        let data = self.source_data.get(mime_type).or_else(|| {
+            let base = mime_type.split(';').next()?.trim();
+            tracing::debug!(
+                requested = mime_type,
+                matched = base,
+                "MIME charset fallback"
+            );
+            self.source_data.get(base)
+        });
+
+        if let Some(data) = data {
             let mut file = fd_to_file(fd);
             if let Err(e) = file.write_all(data) {
                 tracing::error!(
