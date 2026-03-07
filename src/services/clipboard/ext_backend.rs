@@ -110,24 +110,25 @@ impl ClipboardBackend for ExtClipboardBackend {
             return Ok(Some(data.clone()));
         }
 
-        // Check if the MIME type is available from the compositor
-        let available = {
+        // Find a matching MIME type from the compositor, tolerating charset differences
+        // (e.g., "text/plain;charset=utf-8" vs "text/plain")
+        let actual_mime = {
             let shared = self.shared_clipboard.lock().map_err(|_| {
                 PortalError::Wayland("Failed to lock shared clipboard state".to_string())
             })?;
-            shared.mime_types.contains(&mime_type.to_string())
+            super::find_mime_match(mime_type, &shared.mime_types).map(str::to_string)
         };
 
-        if !available {
+        let Some(actual_mime) = actual_mime else {
             return Ok(None);
-        }
+        };
 
         // Create a pipe and request data from the compositor
         let (read_fd, write_fd) = create_pipe()?;
 
         self.clipboard_tx
             .send(ClipboardCommand::ReceiveFromOffer {
-                mime_type: mime_type.to_string(),
+                mime_type: actual_mime,
                 fd: write_fd,
             })
             .map_err(|e| {

@@ -139,6 +139,50 @@ pub trait ClipboardBackend: Send + Sync {
     fn write_done(&mut self, serial: u32, success: bool) -> Result<()>;
 }
 
+/// Find a MIME type match from the available set, tolerating charset differences.
+///
+/// Wayland apps may offer `text/plain` while RDP asks for `text/plain;charset=utf-8`
+/// (or vice versa). This function tries an exact match first, then strips or adds
+/// the charset parameter for text types.
+///
+/// Returns the actual MIME type string from `available` that should be used for
+/// the Wayland `receive` request.
+pub(crate) fn find_mime_match<'a>(requested: &str, available: &'a [String]) -> Option<&'a str> {
+    // Exact match
+    if let Some(found) = available.iter().find(|m| m.as_str() == requested) {
+        return Some(found.as_str());
+    }
+
+    // For text types, try stripping or adding charset parameter
+    if requested.starts_with("text/") {
+        if let Some(base) = requested.split(';').next() {
+            // Requested has charset — try base without it
+            if requested.contains(';') {
+                if let Some(found) = available.iter().find(|m| m.as_str() == base) {
+                    return Some(found.as_str());
+                }
+            }
+
+            // Requested has no charset — try common charset variants
+            if !requested.contains(';') {
+                for suffix in [";charset=utf-8", ";charset=UTF-8"] {
+                    let with_charset = format!("{requested}{suffix}");
+                    if let Some(found) = available.iter().find(|m| m.as_str() == with_charset) {
+                        return Some(found.as_str());
+                    }
+                }
+            }
+
+            // Try any available type that shares the same base
+            if let Some(found) = available.iter().find(|m| m.split(';').next() == Some(base)) {
+                return Some(found.as_str());
+            }
+        }
+    }
+
+    None
+}
+
 /// Create a clipboard backend based on preferences and available protocols.
 ///
 /// Selection algorithm:
@@ -327,5 +371,56 @@ mod tests {
             ..Default::default()
         };
         assert!(create_clipboard_backend(&protocols, &prefs, tx, shared).is_none());
+    }
+
+    #[test]
+    fn test_find_mime_match_exact() {
+        let available = vec!["text/plain".to_string(), "image/png".to_string()];
+        assert_eq!(
+            find_mime_match("text/plain", &available),
+            Some("text/plain")
+        );
+        assert_eq!(find_mime_match("image/png", &available), Some("image/png"));
+        assert_eq!(find_mime_match("text/html", &available), None);
+    }
+
+    #[test]
+    fn test_find_mime_match_strip_charset() {
+        // Server asks for charset variant, compositor offers bare type
+        let available = vec!["text/plain".to_string()];
+        assert_eq!(
+            find_mime_match("text/plain;charset=utf-8", &available),
+            Some("text/plain")
+        );
+    }
+
+    #[test]
+    fn test_find_mime_match_add_charset() {
+        // Server asks for bare type, compositor offers charset variant
+        let available = vec!["text/plain;charset=utf-8".to_string()];
+        assert_eq!(
+            find_mime_match("text/plain", &available),
+            Some("text/plain;charset=utf-8")
+        );
+    }
+
+    #[test]
+    fn test_find_mime_match_non_text_no_fallback() {
+        // Non-text types should not do charset fallback
+        let available = vec!["image/png".to_string()];
+        assert_eq!(find_mime_match("image/png;charset=utf-8", &available), None);
+    }
+
+    #[test]
+    fn test_find_mime_match_prefers_exact() {
+        // When both exact and fuzzy matches exist, prefer exact
+        let available = vec![
+            "text/plain".to_string(),
+            "text/plain;charset=utf-8".to_string(),
+        ];
+        assert_eq!(
+            find_mime_match("text/plain;charset=utf-8", &available),
+            Some("text/plain;charset=utf-8")
+        );
     }
 }
