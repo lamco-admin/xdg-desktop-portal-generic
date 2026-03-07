@@ -120,6 +120,16 @@ pub trait ClipboardBackend: Send + Sync {
     /// Returns the data bytes, or None if the MIME type is not available.
     fn read_selection(&self, mime_type: &str) -> Result<Option<Vec<u8>>>;
 
+    /// Update source data for a MIME type after `set_clipboard`.
+    ///
+    /// Inserts data into the source cache without re-creating the Wayland
+    /// data source. Used when data wasn't available at announcement time
+    /// (e.g., eager fetch from a remote clipboard over RDP).
+    ///
+    /// The Wayland `send` event requires data synchronously, so this must
+    /// be called before the compositor requests the data.
+    fn update_source_data(&mut self, mime_type: &str, data: Vec<u8>) -> Result<()>;
+
     /// Notify the backend that a clipboard write operation has completed.
     ///
     /// Called after the client finishes writing data through a

@@ -152,6 +152,18 @@ pub enum ClipboardCommand {
         /// Data for each MIME type (written to fd on `send` event).
         data: HashMap<String, Vec<u8>>,
     },
+    /// Update source data for a MIME type without re-creating the source.
+    ///
+    /// Used when data wasn't available at `SetSelection` time (eager fetch
+    /// from a remote clipboard). The Wayland data source stays unchanged;
+    /// only the cached data map is updated so the next `send` event can
+    /// serve the requested MIME type.
+    UpdateSourceData {
+        /// MIME type key for the data.
+        mime_type: String,
+        /// Data bytes to cache.
+        data: Vec<u8>,
+    },
     /// Receive clipboard data from the current compositor offer.
     ///
     /// Calls `offer.receive(mime_type, fd)` on the event loop thread.
@@ -334,6 +346,21 @@ impl DataControlState {
                 callback(Vec::new());
             }
         }
+    }
+
+    /// Update cached source data for a MIME type.
+    ///
+    /// Inserts or replaces data in the `source_data` map without
+    /// re-creating the Wayland data source. Used when data arrives
+    /// after `set_selection` was called with an empty data map
+    /// (eager fetch from a remote clipboard).
+    pub fn update_source_data(&mut self, mime_type: String, data: Vec<u8>) {
+        tracing::debug!(
+            mime_type = %mime_type,
+            bytes = data.len(),
+            "Source data updated (post-announcement)"
+        );
+        self.source_data.insert(mime_type, data);
     }
 
     /// Handle a `send` event on our data source.

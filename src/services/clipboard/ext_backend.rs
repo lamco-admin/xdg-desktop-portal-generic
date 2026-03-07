@@ -138,6 +138,18 @@ impl ClipboardBackend for ExtClipboardBackend {
         read_pipe_data(read_fd)
     }
 
+    fn update_source_data(&mut self, mime_type: &str, data: Vec<u8>) -> Result<()> {
+        self.clipboard_tx
+            .send(ClipboardCommand::UpdateSourceData {
+                mime_type: mime_type.to_string(),
+                data,
+            })
+            .map_err(|e| {
+                PortalError::Wayland(format!("Failed to send UpdateSourceData command: {e}"))
+            })?;
+        Ok(())
+    }
+
     fn write_done(&mut self, serial: u32, success: bool) -> Result<()> {
         tracing::debug!(
             serial = serial,

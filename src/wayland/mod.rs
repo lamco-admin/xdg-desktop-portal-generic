@@ -749,6 +749,9 @@ impl WaylandConnection {
                         .data_control
                         .set_selection(&mime_types, data, &self.queue_handle);
                 }
+                ClipboardCommand::UpdateSourceData { mime_type, data } => {
+                    self.state.data_control.update_source_data(mime_type, data);
+                }
                 ClipboardCommand::ReceiveFromOffer { mime_type, fd } => {
                     self.state.data_control.receive_from_offer(&mime_type, fd);
                 }
