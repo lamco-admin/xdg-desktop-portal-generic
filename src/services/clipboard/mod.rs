@@ -42,6 +42,56 @@ impl std::fmt::Display for ClipboardProtocol {
     }
 }
 
+/// Clipboard protocol selection preferences.
+///
+/// Mirrors [`super::capture::CapturePreference`] pattern.
+#[derive(Debug, Clone)]
+pub struct ClipboardPreference {
+    /// Preferred protocol. `None` = auto-detect (ext preferred over wlr).
+    pub preferred: Option<ClipboardProtocol>,
+
+    /// Allow fallback to alternative protocol.
+    pub allow_fallback: bool,
+}
+
+impl Default for ClipboardPreference {
+    fn default() -> Self {
+        Self {
+            preferred: None,
+            allow_fallback: true,
+        }
+    }
+}
+
+impl ClipboardPreference {
+    /// Create preferences from environment variables.
+    ///
+    /// Reads:
+    /// - `XDP_GENERIC_CLIPBOARD_PROTOCOL`: "ext" or "wlr"
+    /// - `XDP_GENERIC_CLIPBOARD_NO_FALLBACK`: "1" to disable fallback
+    pub fn from_env() -> Self {
+        let mut prefs = Self::default();
+
+        if let Ok(protocol) = std::env::var("XDP_GENERIC_CLIPBOARD_PROTOCOL") {
+            match protocol.to_lowercase().as_str() {
+                "ext" | "ext-data-control" => {
+                    prefs.preferred = Some(ClipboardProtocol::ExtDataControl);
+                }
+                "wlr" | "wlr-data-control" => {
+                    prefs.preferred = Some(ClipboardProtocol::WlrDataControl);
+                }
+                _ => tracing::warn!("Unknown clipboard protocol: {}", protocol),
+            }
+        }
+
+        if std::env::var("XDP_GENERIC_CLIPBOARD_NO_FALLBACK").is_ok() {
+            prefs.allow_fallback = false;
+        }
+
+        prefs
+    }
+}
+
 /// Abstraction over clipboard Wayland protocols.
 ///
 /// This trait provides a unified interface for clipboard access,
@@ -79,33 +129,90 @@ pub trait ClipboardBackend: Send + Sync {
     fn write_done(&mut self, serial: u32, success: bool) -> Result<()>;
 }
 
-/// Create a clipboard backend based on available protocols.
+/// Create a clipboard backend based on preferences and available protocols.
 ///
-/// Prefers ext-data-control, falls back to wlr-data-control.
-/// Returns None if no clipboard protocol is available.
+/// Selection algorithm:
+/// 1. If a preferred protocol is specified, try it first
+/// 2. If preferred is unavailable and fallback is allowed, try the alternative
+/// 3. If no preference, auto-detect (ext preferred over wlr)
+/// 4. Returns None if no clipboard protocol is available or usable
 ///
 /// The `clipboard_tx` is the command sender to the Wayland event loop, and
 /// `shared_clipboard` provides cross-thread access to the current selection.
 pub fn create_clipboard_backend(
     protocols: &AvailableProtocols,
+    prefs: &ClipboardPreference,
     clipboard_tx: mpsc::Sender<ClipboardCommand>,
     shared_clipboard: Arc<Mutex<SharedClipboardState>>,
 ) -> Option<Box<dyn ClipboardBackend>> {
-    if protocols.ext_data_control {
-        tracing::info!("Using ext-data-control-v1 for clipboard");
-        Some(Box::new(ExtClipboardBackend::new(
-            clipboard_tx,
-            shared_clipboard,
-        )))
-    } else if protocols.wlr_data_control {
-        tracing::info!("Using wlr-data-control-v1 for clipboard");
-        Some(Box::new(WlrClipboardBackend::new(
-            clipboard_tx,
-            shared_clipboard,
-        )))
+    let ext_available = protocols.ext_data_control;
+    let wlr_available = protocols.wlr_data_control;
+
+    let selected = if let Some(preferred) = prefs.preferred {
+        let preferred_available = match preferred {
+            ClipboardProtocol::ExtDataControl => ext_available,
+            ClipboardProtocol::WlrDataControl => wlr_available,
+        };
+
+        if preferred_available {
+            Some(preferred)
+        } else if prefs.allow_fallback {
+            let fallback = match preferred {
+                ClipboardProtocol::ExtDataControl => ClipboardProtocol::WlrDataControl,
+                ClipboardProtocol::WlrDataControl => ClipboardProtocol::ExtDataControl,
+            };
+            let fallback_available = match fallback {
+                ClipboardProtocol::ExtDataControl => ext_available,
+                ClipboardProtocol::WlrDataControl => wlr_available,
+            };
+
+            if fallback_available {
+                tracing::info!(
+                    "Preferred clipboard protocol {} unavailable, using {}",
+                    preferred,
+                    fallback
+                );
+                Some(fallback)
+            } else {
+                None
+            }
+        } else {
+            tracing::warn!(
+                "Preferred clipboard protocol {} unavailable and fallback disabled",
+                preferred
+            );
+            None
+        }
     } else {
-        tracing::warn!("No clipboard protocols available");
-        None
+        // Auto-detect: ext preferred over wlr
+        if ext_available {
+            Some(ClipboardProtocol::ExtDataControl)
+        } else if wlr_available {
+            Some(ClipboardProtocol::WlrDataControl)
+        } else {
+            None
+        }
+    };
+
+    match selected {
+        Some(ClipboardProtocol::ExtDataControl) => {
+            tracing::info!("Using ext-data-control-v1 for clipboard");
+            Some(Box::new(ExtClipboardBackend::new(
+                clipboard_tx,
+                shared_clipboard,
+            )))
+        }
+        Some(ClipboardProtocol::WlrDataControl) => {
+            tracing::info!("Using wlr-data-control-v1 for clipboard");
+            Some(Box::new(WlrClipboardBackend::new(
+                clipboard_tx,
+                shared_clipboard,
+            )))
+        }
+        None => {
+            tracing::warn!("No clipboard protocols available");
+            None
+        }
     }
 }
 
@@ -129,12 +236,13 @@ mod tests {
     fn test_create_clipboard_backend_ext() {
         let (tx, _rx) = mpsc::channel();
         let shared = Arc::new(Mutex::new(SharedClipboardState::default()));
+        let prefs = ClipboardPreference::default();
         let protocols = AvailableProtocols {
             ext_data_control: true,
             wlr_data_control: true,
             ..Default::default()
         };
-        let backend = create_clipboard_backend(&protocols, tx, shared).unwrap();
+        let backend = create_clipboard_backend(&protocols, &prefs, tx, shared).unwrap();
         assert_eq!(backend.protocol_type(), ClipboardProtocol::ExtDataControl);
     }
 
@@ -142,12 +250,13 @@ mod tests {
     fn test_create_clipboard_backend_wlr_fallback() {
         let (tx, _rx) = mpsc::channel();
         let shared = Arc::new(Mutex::new(SharedClipboardState::default()));
+        let prefs = ClipboardPreference::default();
         let protocols = AvailableProtocols {
             ext_data_control: false,
             wlr_data_control: true,
             ..Default::default()
         };
-        let backend = create_clipboard_backend(&protocols, tx, shared).unwrap();
+        let backend = create_clipboard_backend(&protocols, &prefs, tx, shared).unwrap();
         assert_eq!(backend.protocol_type(), ClipboardProtocol::WlrDataControl);
     }
 
@@ -155,7 +264,58 @@ mod tests {
     fn test_create_clipboard_backend_none() {
         let (tx, _rx) = mpsc::channel();
         let shared = Arc::new(Mutex::new(SharedClipboardState::default()));
+        let prefs = ClipboardPreference::default();
         let protocols = AvailableProtocols::default();
-        assert!(create_clipboard_backend(&protocols, tx, shared).is_none());
+        assert!(create_clipboard_backend(&protocols, &prefs, tx, shared).is_none());
+    }
+
+    #[test]
+    fn test_explicit_wlr_preference() {
+        let (tx, _rx) = mpsc::channel();
+        let shared = Arc::new(Mutex::new(SharedClipboardState::default()));
+        let prefs = ClipboardPreference {
+            preferred: Some(ClipboardProtocol::WlrDataControl),
+            allow_fallback: true,
+        };
+        let protocols = AvailableProtocols {
+            ext_data_control: true,
+            wlr_data_control: true,
+            ..Default::default()
+        };
+        let backend = create_clipboard_backend(&protocols, &prefs, tx, shared).unwrap();
+        assert_eq!(backend.protocol_type(), ClipboardProtocol::WlrDataControl);
+    }
+
+    #[test]
+    fn test_preferred_unavailable_with_fallback() {
+        let (tx, _rx) = mpsc::channel();
+        let shared = Arc::new(Mutex::new(SharedClipboardState::default()));
+        let prefs = ClipboardPreference {
+            preferred: Some(ClipboardProtocol::ExtDataControl),
+            allow_fallback: true,
+        };
+        let protocols = AvailableProtocols {
+            ext_data_control: false,
+            wlr_data_control: true,
+            ..Default::default()
+        };
+        let backend = create_clipboard_backend(&protocols, &prefs, tx, shared).unwrap();
+        assert_eq!(backend.protocol_type(), ClipboardProtocol::WlrDataControl);
+    }
+
+    #[test]
+    fn test_preferred_unavailable_no_fallback() {
+        let (tx, _rx) = mpsc::channel();
+        let shared = Arc::new(Mutex::new(SharedClipboardState::default()));
+        let prefs = ClipboardPreference {
+            preferred: Some(ClipboardProtocol::ExtDataControl),
+            allow_fallback: false,
+        };
+        let protocols = AvailableProtocols {
+            ext_data_control: false,
+            wlr_data_control: true,
+            ..Default::default()
+        };
+        assert!(create_clipboard_backend(&protocols, &prefs, tx, shared).is_none());
     }
 }

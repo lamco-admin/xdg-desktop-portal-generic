@@ -165,6 +165,9 @@ pub struct WaylandConnection {
     available_protocols: AvailableProtocols,
     /// Shared state for cross-thread access (backends read this).
     shared_state: Arc<Mutex<SharedWaylandState>>,
+    /// When true, force wlr-screencopy even if ext-image-copy-capture is bound.
+    /// Set by the service layer when the compositor profile recommends wlr.
+    force_wlr_screencopy: bool,
 }
 
 /// Shared state that is safe to read from other threads.
@@ -228,6 +231,7 @@ impl WaylandConnection {
             state,
             available_protocols,
             shared_state,
+            force_wlr_screencopy: false,
         })
     }
 
@@ -452,6 +456,23 @@ impl WaylandConnection {
         &mut self.state
     }
 
+    /// Force wlr-screencopy even when ext-image-copy-capture is available.
+    ///
+    /// Use when the compositor advertises ext-capture but it doesn't work
+    /// properly (e.g., missing SHM formats in constraints).
+    pub fn set_force_wlr_screencopy(&mut self, force: bool) {
+        self.force_wlr_screencopy = force;
+    }
+
+    /// Set the ext-capture handshake timeout.
+    ///
+    /// If a capture session doesn't receive constraint events (`buffer_size`,
+    /// `shm_format`, `done`) within this duration, the session is considered
+    /// failed. Zero means no timeout (not recommended).
+    pub fn set_ext_capture_handshake_timeout(&mut self, timeout: std::time::Duration) {
+        self.state.ext_capture.handshake_timeout = timeout;
+    }
+
     /// Get the queue handle for creating protocol objects.
     pub fn queue_handle(&self) -> &QueueHandle<WaylandState> {
         &self.queue_handle
@@ -576,7 +597,26 @@ impl WaylandConnection {
             // Process clipboard commands from backends
             self.process_clipboard_commands(&clipboard_rx);
 
-            // Dispatch pending events (whether poll returned ready or timed out)
+            // Check for ext-capture handshake timeouts
+            let timeout = self.state.ext_capture.handshake_timeout;
+            let timed_out = self.state.ext_capture.check_handshake_timeouts(timeout);
+            for node_id in timed_out {
+                self.state.ext_capture.stop_capture(node_id);
+            }
+
+            // Read new events from the Wayland socket into the internal buffer,
+            // then dispatch them to handlers. prepare_read() + read_events()
+            // is required — dispatch_pending() alone only processes events
+            // already in the buffer from previous reads.
+            if pollfd.revents & libc::POLLIN != 0 {
+                if let Some(guard) = self.event_queue.prepare_read() {
+                    if let Err(e) = guard.read() {
+                        tracing::error!("Wayland read_events error: {}", e);
+                        break;
+                    }
+                }
+            }
+
             match self.event_queue.dispatch_pending(&mut self.state) {
                 Ok(_) => {
                     self.update_shared_state();
@@ -619,7 +659,7 @@ impl WaylandConnection {
     /// Routes to ext-image-copy-capture when available, falling back to
     /// wlr-screencopy.
     fn process_capture_commands(&mut self, capture_rx: &mpsc::Receiver<CaptureCommand>) {
-        let use_ext = self.has_ext_capture();
+        let use_ext = self.has_ext_capture() && !self.force_wlr_screencopy;
 
         while let Ok(cmd) = capture_rx.try_recv() {
             match cmd {
@@ -729,8 +769,28 @@ impl WaylandConnection {
         reason = "6-tuple return is the minimum needed to expose all event loop handles"
     )]
     pub fn spawn_event_loop(
+        self,
+        pipewire: Arc<PipeWireManager>,
+    ) -> (
+        Arc<AtomicBool>,
+        Arc<Mutex<SharedWaylandState>>,
+        mpsc::Sender<CaptureCommand>,
+        mpsc::Sender<ClipboardCommand>,
+        Arc<Mutex<SharedClipboardState>>,
+        thread::JoinHandle<()>,
+    ) {
+        self.spawn_event_loop_with_frame_channel(pipewire, None)
+    }
+
+    /// Spawn the event loop with an optional direct frame channel.
+    ///
+    /// When `frame_tx` is provided, screencopy frames are sent through this
+    /// channel instead of PipeWire. This bypasses PipeWire buffer sharing
+    /// which doesn't work across separate PipeWire connections.
+    pub fn spawn_event_loop_with_frame_channel(
         mut self,
         pipewire: Arc<PipeWireManager>,
+        frame_tx: Option<std::sync::mpsc::Sender<crate::wayland::screencopy::RawFrame>>,
     ) -> (
         Arc<AtomicBool>,
         Arc<Mutex<SharedWaylandState>>,
@@ -752,6 +812,14 @@ impl WaylandConnection {
         // can send frame data directly to PipeWire.
         self.state.screencopy.pipewire = Some(Arc::clone(&pipewire));
         self.state.ext_capture.pipewire = Some(pipewire);
+
+        // Wire direct frame channel if provided
+        self.state.screencopy.frame_tx = frame_tx;
+
+        tracing::debug!(
+            timeout_ms = self.state.ext_capture.handshake_timeout.as_millis() as u64,
+            "ext-capture handshake timeout configured"
+        );
 
         let handle = thread::Builder::new()
             .name("wayland-event-loop".to_string())

@@ -9,8 +9,8 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use xdg_desktop_portal_generic::{
     pipewire::PipeWireManager,
     services::{
-        capture::create_capture_backend,
-        clipboard::create_clipboard_backend,
+        capture::{create_capture_backend, CapturePreference},
+        clipboard::{create_clipboard_backend, ClipboardPreference},
         input::{create_input_backend, InputBackendConfig},
     },
     wayland::WaylandConnection,
@@ -31,7 +31,7 @@ async fn main() -> Result<()> {
     tracing::info!("Starting xdg-desktop-portal-generic");
 
     // Connect to compositor as a Wayland client
-    let wayland = WaylandConnection::connect()?;
+    let mut wayland = WaylandConnection::connect()?;
     let protocols = wayland.available_protocols().clone();
     let sources = wayland.state().get_sources();
     tracing::info!("Discovered {} output sources", sources.len());
@@ -40,6 +40,16 @@ async fn main() -> Result<()> {
     // PipeWire starts BEFORE the Wayland event loop because the event loop
     // needs a PipeWire reference to deliver captured frames directly.
     let pipewire_manager = Arc::new(PipeWireManager::start()?);
+
+    // Standalone mode: use env-based preferences (no server to pass hints)
+    let capture_prefs = CapturePreference::from_env();
+
+    // Configure ext-capture handshake timeout before spawning event loop
+    if capture_prefs.handshake_timeout_ms > 0 {
+        wayland.set_ext_capture_handshake_timeout(std::time::Duration::from_millis(
+            capture_prefs.handshake_timeout_ms,
+        ));
+    }
 
     // Spawn the Wayland event loop on a dedicated thread.
     // This continuously dispatches Wayland events (screencopy frames,
@@ -63,12 +73,15 @@ async fn main() -> Result<()> {
 
     let capture_backend = create_capture_backend(
         &protocols,
+        &capture_prefs,
         sources,
         Arc::clone(&pipewire_manager),
         capture_tx,
     )?;
 
-    let clipboard_backend = create_clipboard_backend(&protocols, clipboard_tx, shared_clipboard);
+    let clipboard_prefs = ClipboardPreference::from_env();
+    let clipboard_backend =
+        create_clipboard_backend(&protocols, &clipboard_prefs, clipboard_tx, shared_clipboard);
 
     // Create and run the portal backend
     let mut backend = PortalBackend::new(

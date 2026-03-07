@@ -23,7 +23,11 @@
 //! The `stopped` event on the session means the compositor tore down the
 //! session (e.g., output removed). We must recreate the session if needed.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use wayland_client::{
     protocol::{
@@ -139,6 +143,10 @@ pub struct ActiveExtCapture {
     /// If set, this is a one-shot screenshot capture.
     pub screenshot_reply:
         Option<tokio::sync::oneshot::Sender<std::result::Result<ScreenshotData, String>>>,
+    /// When this capture session was created. Used for handshake timeout detection.
+    pub created_at: Instant,
+    /// Whether the handshake timeout has already been reported for this session.
+    pub timeout_reported: bool,
 }
 
 /// Central ext-image-copy-capture state, stored in WaylandState.
@@ -154,6 +162,8 @@ pub struct ExtCaptureState {
     pub pipewire: Option<Arc<PipeWireManager>>,
     /// Reference to the wl_shm global for buffer allocation.
     pub shm: Option<WlShm>,
+    /// Handshake timeout for constraint events (0 = no timeout).
+    pub handshake_timeout: Duration,
 }
 
 impl ExtCaptureState {
@@ -209,6 +219,8 @@ impl ExtCaptureState {
             pending_frame: None,
             stopped: false,
             screenshot_reply: None,
+            created_at: Instant::now(),
+            timeout_reported: false,
         };
 
         self.captures.insert(node_id, capture);
@@ -255,6 +267,8 @@ impl ExtCaptureState {
             pending_frame: None,
             stopped: false,
             screenshot_reply: Some(reply),
+            created_at: Instant::now(),
+            timeout_reported: false,
         };
 
         self.captures.insert(screenshot_id, capture);
@@ -500,6 +514,50 @@ impl ExtCaptureState {
         } else {
             self.request_next_frame(node_id, qh);
         }
+    }
+
+    /// Check for handshake timeouts on sessions waiting for constraint events.
+    ///
+    /// Called periodically from the Wayland event loop. Returns node IDs of
+    /// sessions whose handshake has timed out (no `done` event within the
+    /// configured timeout). The caller should stop these sessions and report
+    /// the failure.
+    pub fn check_handshake_timeouts(&mut self, timeout: Duration) -> Vec<u32> {
+        if timeout.is_zero() {
+            return vec![];
+        }
+
+        let mut timed_out = vec![];
+
+        for capture in self.captures.values_mut() {
+            // Only check sessions still waiting for constraints
+            if capture.constraints.done || capture.stopped || capture.timeout_reported {
+                continue;
+            }
+
+            let elapsed = capture.created_at.elapsed();
+            if elapsed >= timeout {
+                tracing::warn!(
+                    node_id = capture.node_id,
+                    output = capture.output_global_name,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    timeout_ms = timeout.as_millis() as u64,
+                    "ext-capture handshake timed out: compositor did not send constraint events"
+                );
+                capture.timeout_reported = true;
+                timed_out.push(capture.node_id);
+
+                // For screenshots, send error immediately
+                if let Some(reply) = capture.screenshot_reply.take() {
+                    let _ = reply.send(Err(format!(
+                        "ext-capture handshake timed out after {}ms",
+                        elapsed.as_millis()
+                    )));
+                }
+            }
+        }
+
+        timed_out
     }
 
     /// Request the next frame in the capture loop.

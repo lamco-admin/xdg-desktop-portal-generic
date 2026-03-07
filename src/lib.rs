@@ -29,8 +29,13 @@
 //! Protocol selection is automatic based on compositor capabilities. Override via
 //! environment variables:
 //!
+//! - `XDP_GENERIC_CAPTURE_PROTOCOL=ext|wlr` - Force capture protocol
+//! - `XDP_GENERIC_CAPTURE_NO_FALLBACK=1` - Disable capture fallback
+//! - `XDP_GENERIC_CAPTURE_TIMEOUT_MS=5000` - Ext-capture handshake timeout
 //! - `XDP_GENERIC_INPUT_PROTOCOL=eis|wlr` - Force input protocol
 //! - `XDP_GENERIC_INPUT_NO_FALLBACK=1` - Disable input fallback
+//! - `XDP_GENERIC_CLIPBOARD_PROTOCOL=ext|wlr` - Force clipboard protocol
+//! - `XDP_GENERIC_CLIPBOARD_NO_FALLBACK=1` - Disable clipboard fallback
 //! - `XDP_GENERIC_SOURCE_PICKER` - Path to external source picker tool
 //! - `XDP_GENERIC_COLOR_PICKER` - Path to external color picker tool
 //! - `XDP_GENERIC_COLOR_SCHEME` - Override color-scheme setting (0/1/2)
@@ -76,9 +81,9 @@ use std::{
 
 pub use error::{PortalError, Result};
 // Backend traits and factories
-pub use services::capture::CaptureBackend;
+pub use services::capture::{CaptureBackend, CaptureDetector, CapturePreference, CaptureProtocol};
 pub use services::{
-    clipboard::ClipboardBackend,
+    clipboard::{ClipboardBackend, ClipboardPreference, ClipboardProtocol},
     input::{
         create_input_backend, AvailableProtocols, EisBridgeBackend, EisConfig, EisSession,
         InputBackend, InputBackendConfig, InputProtocol, ProtocolDetector, WlrConfig,
@@ -91,7 +96,7 @@ pub use types::{
     ButtonState, ClipboardData, CursorMode, DeviceTypes, InputEvent, KeyState, KeyboardEvent,
     PointerEvent, ScrollAxis, SourceInfo, SourceType, StreamInfo, TouchEvent,
 };
-pub use wayland::globals::AvailableProtocols as WaylandProtocols;
+pub use wayland::{globals::AvailableProtocols as WaylandProtocols, screencopy::RawFrame};
 
 /// The portal backend service.
 ///

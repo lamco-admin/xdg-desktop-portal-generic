@@ -158,6 +158,10 @@ impl PipeWireManager {
     /// Uses a manual iterate loop with `std::sync::mpsc` for commands.
     /// pipewire-rs 0.9 uses lifetime-bound Box types that prevent Clone/move
     /// into closures, so we poll for commands on each loop iteration.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "PipeWire setup is inherently sequential"
+    )]
     fn run_thread(
         command_rx: &mpsc::Receiver<PipeWireCommand>,
         running: &Arc<AtomicBool>,
@@ -184,8 +188,35 @@ impl PipeWireManager {
                     PipeWireCommand::CreateStream { config, reply } => {
                         let result = stream::PipeWireVideoStream::create(&core, &config);
                         match result {
-                            Ok(pw_stream) => {
-                                let node_id = pw_stream.node_id();
+                            Ok(mut pw_stream) => {
+                                // node_id() returns SPA_ID_INVALID right after connect()
+                                // because node assignment is async. Run main loop iterations
+                                // to let PipeWire process the connection and assign a real ID.
+                                let mut node_id = pw_stream.node_id();
+                                if node_id == u32::MAX {
+                                    for attempt in 0..50 {
+                                        mainloop.loop_().iterate(Duration::from_millis(10));
+                                        node_id = pw_stream.refresh_node_id();
+                                        if node_id != u32::MAX {
+                                            tracing::debug!(
+                                                node_id,
+                                                attempts = attempt + 1,
+                                                "Node ID assigned after main loop iterations"
+                                            );
+                                            break;
+                                        }
+                                    }
+                                    if node_id == u32::MAX {
+                                        tracing::error!(
+                                            "PipeWire stream node ID still invalid after 500ms"
+                                        );
+                                        let _ = reply.send(Err(PortalError::PipeWire(
+                                            "Stream node ID not assigned (SPA_ID_INVALID)"
+                                                .to_string(),
+                                        )));
+                                        continue;
+                                    }
+                                }
                                 tracing::info!(
                                     node_id = node_id,
                                     width = config.width,

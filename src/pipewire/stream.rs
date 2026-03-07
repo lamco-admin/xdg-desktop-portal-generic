@@ -53,7 +53,9 @@ impl PipeWireVideoStream {
         let node_name = format!("xdp-capture-{source_id}");
         let node_desc = format!("Screen Capture Source {source_id}");
 
-        // Create stream with media properties identifying it as a video source
+        // Create stream with media properties identifying it as a video source.
+        // stream.is-live: this stream produces data in real-time.
+        // node.want-driver: request a driver to schedule graph cycles.
         let stream = StreamBox::new(
             core,
             "xdp-screen-capture",
@@ -63,6 +65,8 @@ impl PipeWireVideoStream {
                 "media.category" => "Capture",
                 "node.name" => node_name,
                 "node.description" => node_desc,
+                "stream.is-live" => "true",
+                "node.want-driver" => "true",
             },
         )
         .map_err(|e| PortalError::PipeWire(format!("Failed to create stream: {e}")))?;
@@ -103,15 +107,19 @@ impl PipeWireVideoStream {
         // Connect as an output (we produce frames).
         // MAP_BUFFERS: we want CPU-accessible buffers to copy screencopy data into.
         // ALLOC_BUFFERS: PipeWire allocates the buffer pool.
+        // DRIVER: this stream drives the graph timing (it's a live source).
         stream
             .connect(
                 libspa::utils::Direction::Output,
                 None,
-                StreamFlags::MAP_BUFFERS | StreamFlags::ALLOC_BUFFERS,
+                StreamFlags::MAP_BUFFERS | StreamFlags::ALLOC_BUFFERS | StreamFlags::DRIVER,
                 &mut [pod],
             )
             .map_err(|e| PortalError::PipeWire(format!("Failed to connect stream: {e}")))?;
 
+        // node_id() may return SPA_ID_INVALID (u32::MAX) immediately after
+        // connect() because node assignment is asynchronous. The caller must
+        // run main loop iterations and call refresh_node_id() to get the real ID.
         let node_id = stream.node_id();
 
         Ok(Self { stream, node_id })
@@ -199,6 +207,16 @@ impl PipeWireVideoStream {
 
     /// Get the PipeWire node ID for this stream.
     pub fn node_id(&self) -> u32 {
+        self.node_id
+    }
+
+    /// Re-read the node ID from the underlying PipeWire stream.
+    ///
+    /// After connect(), the node ID is not immediately available.
+    /// Call this after running main loop iterations to get the real ID
+    /// once PipeWire has assigned it.
+    pub fn refresh_node_id(&mut self) -> u32 {
+        self.node_id = self.stream.node_id();
         self.node_id
     }
 

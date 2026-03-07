@@ -527,6 +527,12 @@ impl Dispatch<ZwlrDataControlDeviceV1, ()> for WaylandState {
             _ => {}
         }
     }
+
+    // DataOffer event creates a child ZwlrDataControlOfferV1 object;
+    // without this the default panics in wayland-client's event_queue.rs
+    wayland_client::event_created_child!(WaylandState, ZwlrDataControlDeviceV1, [
+        zwlr_data_control_device_v1::EVT_DATA_OFFER_OPCODE => (ZwlrDataControlOfferV1, ()),
+    ]);
 }
 
 impl Dispatch<ZwlrDataControlSourceV1, ()> for WaylandState {
@@ -738,6 +744,12 @@ impl Dispatch<ExtDataControlDeviceV1, ()> for WaylandState {
             _ => {}
         }
     }
+
+    // DataOffer event creates a child ExtDataControlOfferV1 object;
+    // without this the default panics in wayland-client's event_queue.rs
+    wayland_client::event_created_child!(WaylandState, ExtDataControlDeviceV1, [
+        ext_data_control_device_v1::EVT_DATA_OFFER_OPCODE => (ExtDataControlOfferV1, ()),
+    ]);
 }
 
 impl Dispatch<ExtDataControlSourceV1, ()> for WaylandState {

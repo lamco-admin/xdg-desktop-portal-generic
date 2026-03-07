@@ -224,21 +224,53 @@ pub struct ActiveCapture {
 
 /// Central screencopy state, stored in WaylandState.
 #[derive(Default)]
+/// Raw frame data sent through the direct frame channel.
+#[derive(Debug, Clone)]
+pub struct RawFrame {
+    /// Pixel data.
+    pub data: Vec<u8>,
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// Row stride in bytes.
+    pub stride: u32,
+    /// SPA pixel format (raw u32).
+    pub format_raw: u32,
+}
+
+/// Screencopy protocol state for wlr-screencopy-unstable-v1.
 pub struct ScreencopyState {
     /// The screencopy manager global.
     pub manager: Option<ZwlrScreencopyManagerV1>,
     /// Protocol version of the bound manager (1, 2, or 3).
     /// v3 adds `buffer_done` and `linux_dmabuf` events.
     pub manager_version: u32,
+    /// Total frames delivered (for periodic logging).
+    frame_count: u64,
     /// Active captures, keyed by PipeWire node ID.
     pub captures: HashMap<u32, ActiveCapture>,
     /// Reference to the PipeWire manager for sending frame data.
     pub pipewire: Option<Arc<PipeWireManager>>,
+    /// Direct frame channel for in-process consumers (bypasses PipeWire).
+    pub frame_tx: Option<std::sync::mpsc::Sender<RawFrame>>,
     /// Reference to the wl_shm global for buffer allocation.
     pub shm: Option<WlShm>,
 }
 
-// ScreencopyState derives Default since all fields are Option/HashMap.
+impl Default for ScreencopyState {
+    fn default() -> Self {
+        Self {
+            manager: None,
+            manager_version: 0,
+            frame_count: 0,
+            captures: HashMap::new(),
+            pipewire: None,
+            frame_tx: None,
+            shm: None,
+        }
+    }
+}
 
 impl ScreencopyState {
     /// Start capturing an output.
@@ -450,6 +482,14 @@ impl ScreencopyState {
     /// send to PipeWire (or reply channel for screenshots), and request
     /// the next frame (or remove the capture for screenshots).
     pub fn on_frame_ready(&mut self, node_id: u32, qh: &QueueHandle<WaylandState>) {
+        self.frame_count += 1;
+        if self.frame_count <= 3 || self.frame_count % 1000 == 0 {
+            tracing::debug!(
+                node_id,
+                frame_count = self.frame_count,
+                "Screencopy frame ready"
+            );
+        }
         // Read pixel data from the SHM buffer
         let (data, width, height, stride, format_raw, is_screenshot) = {
             let Some(capture) = self.captures.get_mut(&node_id) else {
@@ -495,8 +535,23 @@ impl ScreencopyState {
                 tracing::info!(node_id, width, height, "Screenshot capture complete");
             }
         } else {
-            // Continuous capture: send to PipeWire and request next frame
-            if let Some(pw) = &self.pipewire {
+            // Continuous capture: send frame and request next
+            if let Some(tx) = &self.frame_tx {
+                // Direct channel path — send raw frame data to in-process consumer
+                let frame = RawFrame {
+                    data,
+                    width,
+                    height,
+                    stride,
+                    format_raw,
+                };
+                if tx.send(frame).is_err() {
+                    tracing::warn!(node_id, "Direct frame channel closed");
+                } else {
+                    tracing::trace!(node_id, width, height, "Sent frame via direct channel");
+                }
+            } else if let Some(pw) = &self.pipewire {
+                // PipeWire path — for external consumers
                 pw.queue_buffer(node_id, data, width, height, stride, format_raw);
                 tracing::trace!(node_id, width, height, "Queued frame to PipeWire");
             }
