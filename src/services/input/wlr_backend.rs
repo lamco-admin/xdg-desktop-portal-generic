@@ -236,7 +236,7 @@ impl WlrInputBackend {
         let keymap_size = keymap_bytes.len() as u32;
 
         // Create a memfd for the keymap data
-        let memfd = memfd::memfd_create(c"xdp-keymap", memfd::MemFdCreateFlag::MFD_CLOEXEC)
+        let memfd = memfd::memfd_create(c"xdp-keymap", memfd::MFdFlags::MFD_CLOEXEC)
             .map_err(|e| PortalError::Config(format!("Failed to create memfd for keymap: {e}")))?;
 
         // Write keymap bytes to the memfd

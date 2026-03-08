@@ -15,7 +15,7 @@
 use std::{
     collections::HashMap,
     io::Read,
-    os::unix::io::{AsRawFd, FromRawFd, OwnedFd},
+    os::unix::io::{AsRawFd, OwnedFd},
     sync::{mpsc, Arc, Mutex},
 };
 
@@ -163,20 +163,9 @@ impl ClipboardBackend for ExtClipboardBackend {
 }
 
 /// Create a Unix pipe, returning (read_fd, write_fd).
-#[expect(
-    unsafe_code,
-    reason = "pipe2 and OwnedFd::from_raw_fd require unsafe FFI"
-)]
 fn create_pipe() -> Result<(OwnedFd, OwnedFd)> {
-    let (read, write) = nix::unistd::pipe()
-        .map_err(|e| PortalError::FdPassingFailed(format!("Failed to create pipe: {e}")))?;
-
-    let read_fd = unsafe { OwnedFd::from_raw_fd(read.as_raw_fd()) };
-    let write_fd = unsafe { OwnedFd::from_raw_fd(write.as_raw_fd()) };
-    std::mem::forget(read);
-    std::mem::forget(write);
-
-    Ok((read_fd, write_fd))
+    nix::unistd::pipe()
+        .map_err(|e| PortalError::FdPassingFailed(format!("Failed to create pipe: {e}")))
 }
 
 /// Read all data from a pipe fd with a timeout.
@@ -189,18 +178,16 @@ fn create_pipe() -> Result<(OwnedFd, OwnedFd)> {
     reason = "poll() requires unsafe libc call and File::from_raw_fd requires unsafe FFI"
 )]
 fn read_pipe_data(read_fd: OwnedFd) -> Result<Option<Vec<u8>>> {
-    let raw_fd = read_fd.as_raw_fd();
-
     // Set non-blocking so reads don't hang
-    let flags = nix::fcntl::fcntl(raw_fd, nix::fcntl::FcntlArg::F_GETFL)
+    let flags = nix::fcntl::fcntl(&read_fd, nix::fcntl::FcntlArg::F_GETFL)
         .map_err(|e| PortalError::Io(std::io::Error::from(e)))?;
     let mut oflags = nix::fcntl::OFlag::from_bits_truncate(flags);
     oflags.insert(nix::fcntl::OFlag::O_NONBLOCK);
-    nix::fcntl::fcntl(raw_fd, nix::fcntl::FcntlArg::F_SETFL(oflags))
+    nix::fcntl::fcntl(&read_fd, nix::fcntl::FcntlArg::F_SETFL(oflags))
         .map_err(|e| PortalError::Io(std::io::Error::from(e)))?;
 
-    let mut file = unsafe { std::fs::File::from_raw_fd(read_fd.as_raw_fd()) };
-    std::mem::forget(read_fd);
+    let mut file = std::fs::File::from(read_fd);
+    let poll_fd = file.as_raw_fd();
 
     let mut data = Vec::new();
     const MAX_SIZE: usize = 100 * 1024 * 1024; // 100MB limit
@@ -209,7 +196,7 @@ fn read_pipe_data(read_fd: OwnedFd) -> Result<Option<Vec<u8>>> {
     loop {
         // Wait for data with timeout using poll()
         let mut pollfd = libc::pollfd {
-            fd: raw_fd,
+            fd: poll_fd,
             events: libc::POLLIN,
             revents: 0,
         };

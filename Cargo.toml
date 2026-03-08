@@ -56,13 +56,13 @@ futures = "0.3"
 uuid = { version = "1.11", features = ["v4"] }
 
 # XKB keymap handling
-xkbcommon = { version = "0.8", features = ["wayland"] }
+xkbcommon = { version = "0.9", features = ["wayland"] }
 
 # Image encoding (for Screenshot portal)
 png = "0.17"
 
 # System
-nix = { version = "0.29", features = ["socket", "poll", "fs", "mman", "time"] }
+nix = { version = "0.30", features = ["socket", "poll", "fs", "mman", "time"] }
 libc = "0.2"
 
 [dev-dependencies]

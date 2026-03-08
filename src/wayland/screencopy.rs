@@ -138,13 +138,11 @@ impl ShmFrameBuffer {
 
     /// Create an anonymous memfd and set its size.
     fn create_memfd(size: usize) -> Result<OwnedFd, String> {
-        use nix::sys::memfd::{memfd_create, MemFdCreateFlag};
-
-        let name = c"xdp-screencopy";
+        use nix::sys::memfd::{memfd_create, MFdFlags};
 
         let fd = memfd_create(
-            name,
-            MemFdCreateFlag::MFD_CLOEXEC | MemFdCreateFlag::MFD_ALLOW_SEALING,
+            c"xdp-screencopy",
+            MFdFlags::MFD_CLOEXEC | MFdFlags::MFD_ALLOW_SEALING,
         )
         .map_err(|e| format!("memfd_create failed: {e}"))?;
 
