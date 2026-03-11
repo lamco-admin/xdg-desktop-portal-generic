@@ -610,9 +610,21 @@ impl WaylandConnection {
             // already in the buffer from previous reads.
             if pollfd.revents & libc::POLLIN != 0 {
                 if let Some(guard) = self.event_queue.prepare_read() {
-                    if let Err(e) = guard.read() {
-                        tracing::error!("Wayland read_events error: {}", e);
-                        break;
+                    match guard.read() {
+                        Ok(_) => {}
+                        // WouldBlock can occur if another thread consumed the
+                        // pending data between poll() and read(). This is benign
+                        // — wayland-client's own blocking_read() handles it the
+                        // same way (returns Ok(0) and lets the caller retry).
+                        Err(wayland_client::backend::WaylandError::Io(ref e))
+                            if e.kind() == std::io::ErrorKind::WouldBlock =>
+                        {
+                            tracing::trace!("Wayland read returned WouldBlock, retrying");
+                        }
+                        Err(e) => {
+                            tracing::error!("Wayland read_events error: {}", e);
+                            break;
+                        }
                     }
                 }
             }
@@ -628,9 +640,17 @@ impl WaylandConnection {
             }
 
             // Flush outgoing requests
-            if let Err(e) = self.connection.flush() {
-                tracing::error!("Wayland flush error: {}", e);
-                break;
+            match self.connection.flush() {
+                Ok(()) => {}
+                Err(wayland_client::backend::WaylandError::Io(ref e))
+                    if e.kind() == std::io::ErrorKind::WouldBlock =>
+                {
+                    tracing::trace!("Wayland flush returned WouldBlock, will retry next cycle");
+                }
+                Err(e) => {
+                    tracing::error!("Wayland flush error: {}", e);
+                    break;
+                }
             }
         }
 

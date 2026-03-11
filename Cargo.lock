@@ -678,7 +678,7 @@ dependencies = [
  "cookie-factory",
  "libc",
  "libspa-sys",
- "nix 0.30.1",
+ "nix",
  "nom 8.0.0",
  "system-deps",
 ]
@@ -777,19 +777,6 @@ dependencies = [
 
 [[package]]
 name = "nix"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71e2746dc3a24dd78b3cfcb7be93368c6de9963d30f43a6a73998a9cf4b17b46"
-dependencies = [
- "bitflags 2.11.0",
- "cfg-if",
- "cfg_aliases",
- "libc",
- "memoffset",
-]
-
-[[package]]
-name = "nix"
 version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
@@ -798,6 +785,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+ "memoffset",
 ]
 
 [[package]]
@@ -901,7 +889,7 @@ dependencies = [
  "libc",
  "libspa",
  "libspa-sys",
- "nix 0.30.1",
+ "nix",
  "once_cell",
  "pipewire-sys",
  "thiserror",
@@ -1873,14 +1861,14 @@ dependencies = [
 
 [[package]]
 name = "xdg-desktop-portal-generic"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "enumflags2",
  "futures",
  "libc",
  "libspa",
- "nix 0.29.0",
+ "nix",
  "pipewire",
  "png",
  "reis",
@@ -1901,9 +1889,9 @@ dependencies = [
 
 [[package]]
 name = "xkbcommon"
-version = "0.8.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d66ca9352cbd4eecbbc40871d8a11b4ac8107cfc528a6e14d7c19c69d0e1ac9"
+checksum = "a7a974f48060a14e95705c01f24ad9c3345022f4d97441b8a36beb7ed5c4a02d"
 dependencies = [
  "libc",
  "memmap2",
