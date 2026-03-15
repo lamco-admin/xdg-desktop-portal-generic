@@ -67,6 +67,7 @@
 
 pub mod dbus;
 pub mod error;
+pub mod health;
 pub mod pipewire;
 pub mod services;
 pub mod session;
@@ -120,6 +121,10 @@ pub struct PortalBackend {
     capture_tx: mpsc::Sender<wayland::CaptureCommand>,
     /// Shared Wayland state for monitoring output changes.
     shared_wayland_state: Option<Arc<std::sync::Mutex<wayland::SharedWaylandState>>>,
+    /// Health event sender (cloned to subsystems).
+    health_tx: health::HealthSender,
+    /// Health event receiver (consumed by the portal backend's consumer).
+    health_rx: Option<health::HealthReceiver>,
 }
 
 impl PortalBackend {
@@ -132,6 +137,7 @@ impl PortalBackend {
         available_protocols: wayland::globals::AvailableProtocols,
         capture_tx: mpsc::Sender<wayland::CaptureCommand>,
     ) -> Self {
+        let (health_tx, health_rx) = health::health_channel();
         Self {
             session_manager: Arc::new(Mutex::new(SessionManager::new())),
             input_backend: Arc::new(Mutex::new(input_backend)),
@@ -141,7 +147,22 @@ impl PortalBackend {
             available_protocols,
             capture_tx,
             shared_wayland_state: None,
+            health_tx,
+            health_rx: Some(health_rx),
         }
+    }
+
+    /// Get a clone of the health event sender for passing to subsystems.
+    pub fn health_sender(&self) -> health::HealthSender {
+        self.health_tx.clone()
+    }
+
+    /// Take the health event receiver (can only be called once).
+    ///
+    /// The consumer (e.g., lamco-rdp-server) calls this to receive health
+    /// events from all portal subsystems.
+    pub fn take_health_receiver(&mut self) -> Option<health::HealthReceiver> {
+        self.health_rx.take()
     }
 
     /// Set the shared Wayland state for output hotplug monitoring.

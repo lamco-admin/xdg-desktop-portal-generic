@@ -209,6 +209,8 @@ pub struct ActiveCapture {
     pub shm_buffer: Option<ShmFrameBuffer>,
     /// The currently pending frame (waiting for ready/failed).
     pub pending_frame: Option<ZwlrScreencopyFrameV1>,
+    /// When the current frame capture was initiated (for latency measurement).
+    pub capture_started: Option<std::time::Instant>,
     /// Buffer format info from the most recent frame `buffer` event.
     pub pending_format: Option<BufferFormatInfo>,
     /// Whether we've received `buffer_done` (v3) for the current frame.
@@ -254,6 +256,8 @@ pub struct ScreencopyState {
     pub frame_tx: Option<std::sync::mpsc::Sender<RawFrame>>,
     /// Reference to the wl_shm global for buffer allocation.
     pub shm: Option<WlShm>,
+    /// Health event sender for capture metrics.
+    pub health_tx: Option<crate::health::HealthSender>,
 }
 
 impl Default for ScreencopyState {
@@ -266,6 +270,7 @@ impl Default for ScreencopyState {
             pipewire: None,
             frame_tx: None,
             shm: None,
+            health_tx: None,
         }
     }
 }
@@ -314,6 +319,7 @@ impl ScreencopyState {
             pending_format: None,
             buffer_done_received: false,
             screenshot_reply: None,
+            capture_started: None,
         };
 
         self.captures.insert(node_id, capture);
@@ -356,6 +362,7 @@ impl ScreencopyState {
             pending_format: None,
             buffer_done_received: false,
             screenshot_reply: Some(reply),
+            capture_started: None,
         };
 
         self.captures.insert(screenshot_id, capture);
@@ -469,6 +476,7 @@ impl ScreencopyState {
 
         // Copy: tell the compositor to write into our buffer
         if let (Some(frame), Some(buf)) = (&capture.pending_frame, &capture.shm_buffer) {
+            capture.capture_started = Some(std::time::Instant::now());
             frame.copy(&buf.buffer);
             tracing::trace!(node_id, "Sent frame.copy() to compositor");
         }
@@ -481,10 +489,19 @@ impl ScreencopyState {
     /// the next frame (or remove the capture for screenshots).
     pub fn on_frame_ready(&mut self, node_id: u32, qh: &QueueHandle<WaylandState>) {
         self.frame_count += 1;
+
+        // Measure capture latency
+        let capture_latency = self
+            .captures
+            .get(&node_id)
+            .and_then(|c| c.capture_started)
+            .map(|start| start.elapsed());
+
         if self.frame_count <= 3 || self.frame_count % 1000 == 0 {
             tracing::debug!(
                 node_id,
                 frame_count = self.frame_count,
+                capture_latency_us = capture_latency.map(|d| d.as_micros() as u64),
                 "Screencopy frame ready"
             );
         }
@@ -554,6 +571,18 @@ impl ScreencopyState {
                 tracing::trace!(node_id, width, height, "Queued frame to PipeWire");
             }
 
+            // Emit health event for successful frame capture
+            if let Some(health_tx) = &self.health_tx {
+                let frame_size = (width * height * 4) as usize; // RGBA
+                let _ = health_tx.try_send(crate::health::PortalHealthEvent::FrameCaptured {
+                    node_id,
+                    capture_latency: capture_latency.unwrap_or(std::time::Duration::ZERO),
+                    frame_size_bytes: frame_size,
+                    frame_number: self.frame_count,
+                    damage_region_count: 1, // wlr-screencopy sends one damage rect
+                });
+            }
+
             self.request_next_frame(node_id, qh);
         }
     }
@@ -580,6 +609,14 @@ impl ScreencopyState {
             }
 
             tracing::warn!(node_id, "Screencopy frame failed, retrying");
+
+            // Emit health event for failed frame
+            if let Some(health_tx) = &self.health_tx {
+                let _ = health_tx.try_send(crate::health::PortalHealthEvent::FrameFailed {
+                    node_id,
+                    reason: "Screencopy frame capture failed".to_string(),
+                });
+            }
         }
 
         // Request next frame (retry) for regular captures

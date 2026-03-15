@@ -168,6 +168,8 @@ pub struct WaylandConnection {
     /// When true, force wlr-screencopy even if ext-image-copy-capture is bound.
     /// Set by the service layer when the compositor profile recommends wlr.
     force_wlr_screencopy: bool,
+    /// Health event sender, passed to capture backends for metrics reporting.
+    health_tx: Option<crate::health::HealthSender>,
 }
 
 /// Shared state that is safe to read from other threads.
@@ -232,7 +234,16 @@ impl WaylandConnection {
             available_protocols,
             shared_state,
             force_wlr_screencopy: false,
+            health_tx: None,
         })
+    }
+
+    /// Set the health event sender for capture metrics reporting.
+    ///
+    /// Must be called before `spawn_event_loop*`. The sender is cloned to
+    /// each capture backend (screencopy, ext-capture) when the event loop starts.
+    pub fn set_health_sender(&mut self, tx: crate::health::HealthSender) {
+        self.health_tx = Some(tx);
     }
 
     /// Detect available protocols from globals and bind them.
@@ -838,6 +849,12 @@ impl WaylandConnection {
 
         // Wire direct frame channel if provided
         self.state.screencopy.frame_tx = frame_tx;
+
+        // Wire health sender if set
+        if let Some(ref health_tx) = self.health_tx {
+            self.state.screencopy.health_tx = Some(health_tx.clone());
+            self.state.ext_capture.health_tx = Some(health_tx.clone());
+        }
 
         tracing::debug!(
             timeout_ms = self.state.ext_capture.handshake_timeout.as_millis() as u64,

@@ -147,6 +147,8 @@ pub struct ActiveExtCapture {
     pub created_at: Instant,
     /// Whether the handshake timeout has already been reported for this session.
     pub timeout_reported: bool,
+    /// When the current frame capture was initiated (for latency measurement).
+    pub capture_started: Option<Instant>,
 }
 
 /// Central ext-image-copy-capture state, stored in WaylandState.
@@ -164,6 +166,10 @@ pub struct ExtCaptureState {
     pub shm: Option<WlShm>,
     /// Handshake timeout for constraint events (0 = no timeout).
     pub handshake_timeout: Duration,
+    /// Total frames delivered (for periodic logging and health).
+    pub frame_count: u64,
+    /// Health event sender for capture metrics.
+    pub health_tx: Option<crate::health::HealthSender>,
 }
 
 impl ExtCaptureState {
@@ -221,6 +227,7 @@ impl ExtCaptureState {
             screenshot_reply: None,
             created_at: Instant::now(),
             timeout_reported: false,
+            capture_started: None,
         };
 
         self.captures.insert(node_id, capture);
@@ -269,6 +276,7 @@ impl ExtCaptureState {
             screenshot_reply: Some(reply),
             created_at: Instant::now(),
             timeout_reported: false,
+            capture_started: None,
         };
 
         self.captures.insert(screenshot_id, capture);
@@ -408,6 +416,7 @@ impl ExtCaptureState {
         if let Some(buf) = &capture.shm_buffer {
             frame.attach_buffer(&buf.buffer);
             frame.damage_buffer(0, 0, format.width as i32, format.height as i32);
+            capture.capture_started = Some(Instant::now());
             frame.capture();
             tracing::trace!(node_id, "Sent ext frame capture request");
         }
@@ -419,6 +428,15 @@ impl ExtCaptureState {
     ///
     /// The compositor has finished writing pixel data.
     pub fn on_frame_ready(&mut self, node_id: u32, qh: &QueueHandle<WaylandState>) {
+        self.frame_count += 1;
+
+        // Measure capture latency
+        let capture_latency = self
+            .captures
+            .get(&node_id)
+            .and_then(|c| c.capture_started)
+            .map(|start| start.elapsed());
+
         let (data, width, height, stride, format_raw, is_screenshot) = {
             let Some(capture) = self.captures.get_mut(&node_id) else {
                 return;
@@ -471,6 +489,18 @@ impl ExtCaptureState {
                 tracing::trace!(node_id, width, height, "Queued ext frame to PipeWire");
             }
 
+            // Emit health event for successful frame
+            if let Some(health_tx) = &self.health_tx {
+                let frame_size = (width * height * 4) as usize;
+                let _ = health_tx.try_send(crate::health::PortalHealthEvent::FrameCaptured {
+                    node_id,
+                    capture_latency: capture_latency.unwrap_or(std::time::Duration::ZERO),
+                    frame_size_bytes: frame_size,
+                    frame_number: self.frame_count,
+                    damage_region_count: 1,
+                });
+            }
+
             self.request_next_frame(node_id, qh);
         }
     }
@@ -497,6 +527,20 @@ impl ExtCaptureState {
             }
 
             tracing::warn!(node_id, reason, "ext frame capture failed, retrying");
+
+            // Emit health event for failed frame
+            if let Some(health_tx) = &self.health_tx {
+                let reason_str = match reason {
+                    0 => "unknown",
+                    1 => "buffer_constraints",
+                    2 => "stopped",
+                    _ => "unrecognized",
+                };
+                let _ = health_tx.try_send(crate::health::PortalHealthEvent::FrameFailed {
+                    node_id,
+                    reason: format!("ext capture failed: {reason_str}"),
+                });
+            }
         }
 
         // Retry for continuous captures (unless stopped or buffer_constraints failure)
