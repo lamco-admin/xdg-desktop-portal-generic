@@ -49,6 +49,8 @@ pub struct EisBridgeBackend {
     sessions: HashMap<String, EisSession>,
     /// Shared wlr backend for all sessions' output.
     wlr: WlrInputBackend,
+    /// Health event sender for input metrics.
+    health_tx: Option<crate::health::HealthSender>,
 }
 
 impl EisBridgeBackend {
@@ -64,6 +66,7 @@ impl EisBridgeBackend {
         Ok(Self {
             sessions: HashMap::new(),
             wlr,
+            health_tx: None,
         })
     }
 
@@ -163,7 +166,8 @@ impl EisBridgeBackend {
                 time_usec: t.time,
             })),
 
-            // Protocol-level events that don't produce input
+            // Protocol-level events don't produce InputEvent.
+            // Frame, DeviceStart/StopEmulating carry health data harvested in process_events().
             EisRequest::Disconnect
             | EisRequest::Bind(_)
             | EisRequest::Frame(_)
@@ -245,13 +249,57 @@ impl InputBackend for EisBridgeBackend {
             match session.process() {
                 Ok(eis_requests) => {
                     for request in &eis_requests {
-                        if matches!(request, EisRequest::Disconnect) {
-                            tracing::info!(
-                                session_id = %session_id,
-                                "EIS client disconnected"
-                            );
-                            disconnected.push(session_id.clone());
-                            continue;
+                        // Harvest health signals from protocol events
+                        match request {
+                            EisRequest::Disconnect => {
+                                tracing::info!(
+                                    session_id = %session_id,
+                                    "EIS client disconnected"
+                                );
+                                if let Some(ref health_tx) = self.health_tx {
+                                    let _ = health_tx.try_send(
+                                        crate::health::PortalHealthEvent::InputDisconnected {
+                                            reason: "EIS client disconnected".to_string(),
+                                            recoverable: true,
+                                        },
+                                    );
+                                }
+                                disconnected.push(session_id.clone());
+                                continue;
+                            }
+                            EisRequest::Frame(frame) => {
+                                if let Some(ref health_tx) = self.health_tx {
+                                    let _ = health_tx.try_send(
+                                        crate::health::PortalHealthEvent::EisFrameReceived {
+                                            last_serial: frame.last_serial,
+                                            time_usec: frame.time,
+                                        },
+                                    );
+                                }
+                            }
+                            EisRequest::DeviceStartEmulating(evt) => {
+                                if let Some(ref health_tx) = self.health_tx {
+                                    let _ = health_tx.try_send(
+                                        crate::health::PortalHealthEvent::EisDeviceStateChanged {
+                                            emulating: true,
+                                            serial: evt.last_serial,
+                                            sequence: evt.sequence,
+                                        },
+                                    );
+                                }
+                            }
+                            EisRequest::DeviceStopEmulating(evt) => {
+                                if let Some(ref health_tx) = self.health_tx {
+                                    let _ = health_tx.try_send(
+                                        crate::health::PortalHealthEvent::EisDeviceStateChanged {
+                                            emulating: false,
+                                            serial: evt.last_serial,
+                                            sequence: 0,
+                                        },
+                                    );
+                                }
+                            }
+                            _ => {}
                         }
 
                         if let Some(event) = Self::eis_request_to_input_event(request) {
@@ -303,6 +351,11 @@ impl InputBackend for EisBridgeBackend {
     fn keysym_to_keycode(&self, keysym: u32) -> Option<u32> {
         // Delegate to wlr backend's XKB keymap
         self.wlr.keysym_to_keycode(keysym)
+    }
+
+    fn set_health_sender(&mut self, tx: crate::health::HealthSender) {
+        self.health_tx = Some(tx.clone());
+        self.wlr.set_health_sender(tx);
     }
 
     fn set_stream_mappings(&mut self, mappings: Vec<StreamOutputMapping>) {

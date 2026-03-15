@@ -152,6 +152,14 @@ pub trait InputBackend: Send + Sync {
     fn set_stream_mappings(&mut self, _mappings: Vec<crate::types::StreamOutputMapping>) {
         // Default no-op for backends that don't need multi-monitor support
     }
+
+    /// Set the health event sender for input metrics reporting.
+    ///
+    /// When set, the backend emits [`crate::health::PortalHealthEvent`] variants
+    /// for input operations (event counts, EIS frame serials, disconnects).
+    fn set_health_sender(&mut self, _tx: crate::health::HealthSender) {
+        // Default no-op for backends that don't implement health monitoring
+    }
 }
 
 /// Configuration for input backend selection.

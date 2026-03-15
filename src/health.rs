@@ -92,6 +92,32 @@ pub enum PortalHealthEvent {
         bytes: usize,
     },
 
+    // --- EIS Protocol ---
+    /// EIS Frame event received with serial and timestamp.
+    ///
+    /// Frame events batch input events with a monotonic serial number
+    /// and CLOCK_MONOTONIC microsecond timestamp. Serial gaps indicate
+    /// lost events; inter-frame timing indicates client input rate.
+    EisFrameReceived {
+        /// Last serial number from the EIS client.
+        last_serial: u32,
+        /// Client-side CLOCK_MONOTONIC timestamp in microseconds.
+        time_usec: u64,
+    },
+
+    /// EIS device emulation state changed.
+    ///
+    /// StartEmulating = client begins sending input events.
+    /// StopEmulating = client stops sending input events.
+    EisDeviceStateChanged {
+        /// Whether the device is now emulating.
+        emulating: bool,
+        /// Serial number at the state change.
+        serial: u32,
+        /// Sequence number (nonzero for StartEmulating only).
+        sequence: u32,
+    },
+
     // --- Session ---
     /// Portal session state changed.
     SessionStateChanged {

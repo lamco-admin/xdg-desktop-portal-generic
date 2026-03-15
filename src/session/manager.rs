@@ -70,6 +70,11 @@ impl SessionManager {
         // Replace hyphens in UUID with underscores
         let uuid_str = uuid.to_string().replace('-', "_");
         let path = format!("/org/freedesktop/portal/generic/session/s{id}_{uuid_str}");
+        // Path is constructed from a known-valid prefix + sanitized UUID.
+        #[expect(
+            clippy::expect_used,
+            reason = "path format is validated by construction"
+        )]
         ObjectPath::try_from(path).expect("generated valid object path")
     }
 
@@ -120,6 +125,8 @@ impl SessionManager {
 
         // Insert and return
         self.sessions.insert(handle_str.clone(), session);
+        // Entry was just inserted on the line above.
+        #[expect(clippy::expect_used, reason = "key was just inserted")]
         Ok(self.sessions.get_mut(&handle_str).expect("just inserted"))
     }
 

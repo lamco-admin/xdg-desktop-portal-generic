@@ -130,6 +130,14 @@ pub trait ClipboardBackend: Send + Sync {
     /// be called before the compositor requests the data.
     fn update_source_data(&mut self, mime_type: &str, data: Vec<u8>) -> Result<()>;
 
+    /// Set the health event sender for clipboard metrics reporting.
+    ///
+    /// When set, the backend emits [`crate::health::PortalHealthEvent`] variants
+    /// for clipboard operations (set, read, selection changes).
+    fn set_health_sender(&mut self, _tx: crate::health::HealthSender) {
+        // Default no-op for backends that don't implement health monitoring
+    }
+
     /// Notify the backend that a clipboard write operation has completed.
     ///
     /// Called after the client finishes writing data through a

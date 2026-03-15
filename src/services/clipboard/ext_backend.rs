@@ -41,6 +41,8 @@ pub struct ExtClipboardBackend {
     local_data: HashMap<String, Vec<u8>>,
     /// MIME types from our last SetSelection (for immediate read-back).
     local_mime_types: Vec<String>,
+    /// Health event sender for clipboard metrics.
+    health_tx: Option<crate::health::HealthSender>,
 }
 
 impl ExtClipboardBackend {
@@ -54,6 +56,7 @@ impl ExtClipboardBackend {
             shared_clipboard,
             local_data: HashMap::new(),
             local_mime_types: Vec::new(),
+            health_tx: None,
         }
     }
 }
@@ -81,6 +84,8 @@ impl ClipboardBackend for ExtClipboardBackend {
             "Setting clipboard"
         );
 
+        let total_bytes: usize = data.data.values().map(Vec::len).sum();
+
         // Cache locally for immediate read-back
         self.local_mime_types.clone_from(&data.mime_types);
         self.local_data.clone_from(&data.data);
@@ -94,6 +99,13 @@ impl ClipboardBackend for ExtClipboardBackend {
             .map_err(|e| {
                 PortalError::Wayland(format!("Failed to send SetSelection command: {e}"))
             })?;
+
+        if let Some(ref health_tx) = self.health_tx {
+            let _ = health_tx.try_send(crate::health::PortalHealthEvent::ClipboardTransferResult {
+                success: true,
+                bytes: total_bytes,
+            });
+        }
 
         Ok(())
     }
@@ -149,6 +161,10 @@ impl ClipboardBackend for ExtClipboardBackend {
                 PortalError::Wayland(format!("Failed to send UpdateSourceData command: {e}"))
             })?;
         Ok(())
+    }
+
+    fn set_health_sender(&mut self, tx: crate::health::HealthSender) {
+        self.health_tx = Some(tx);
     }
 
     fn write_done(&mut self, serial: u32, success: bool) -> Result<()> {

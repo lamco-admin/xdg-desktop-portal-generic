@@ -113,6 +113,12 @@ pub struct WlrInputBackend {
     /// Mapping from PipeWire stream node IDs to output geometry.
     /// Used for multi-monitor absolute pointer positioning.
     stream_mappings: HashMap<u32, StreamOutputMapping>,
+    /// Health event sender for input metrics.
+    health_tx: Option<crate::health::HealthSender>,
+    /// Total events successfully forwarded.
+    events_forwarded: u64,
+    /// Total flush failures (indicates broken Wayland connection).
+    flush_failures: u64,
 }
 
 /// State for Wayland protocol handling.
@@ -181,6 +187,9 @@ impl WlrInputBackend {
             state,
             sessions: HashMap::new(),
             stream_mappings: HashMap::new(),
+            health_tx: None,
+            events_forwarded: 0,
+            flush_failures: 0,
         })
     }
 
@@ -598,8 +607,35 @@ impl InputBackend for WlrInputBackend {
             }
         }
 
-        self.flush()?;
-        Ok(())
+        match self.flush() {
+            Ok(()) => {
+                self.events_forwarded += 1;
+
+                // Emit periodic InputBatch health event
+                if self.events_forwarded % 100 == 0 {
+                    if let Some(ref health_tx) = self.health_tx {
+                        let _ = health_tx.try_send(crate::health::PortalHealthEvent::InputBatch {
+                            events_forwarded: self.events_forwarded,
+                            events_failed: self.flush_failures,
+                            protocol: crate::health::InputProtocolType::WlrVirtual,
+                        });
+                    }
+                }
+
+                Ok(())
+            }
+            Err(e) => {
+                self.flush_failures += 1;
+                if let Some(ref health_tx) = self.health_tx {
+                    let _ =
+                        health_tx.try_send(crate::health::PortalHealthEvent::InputDisconnected {
+                            reason: format!("Wayland flush failed: {e}"),
+                            recoverable: false,
+                        });
+                }
+                Err(e)
+            }
+        }
     }
 
     fn process_events(&mut self) -> Result<Vec<(String, InputEvent)>> {
@@ -641,6 +677,10 @@ impl InputBackend for WlrInputBackend {
 
         tracing::warn!(keysym = keysym, "No keycode found for keysym");
         None
+    }
+
+    fn set_health_sender(&mut self, tx: crate::health::HealthSender) {
+        self.health_tx = Some(tx);
     }
 
     fn set_stream_mappings(&mut self, mappings: Vec<StreamOutputMapping>) {

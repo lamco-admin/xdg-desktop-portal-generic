@@ -240,6 +240,7 @@ pub struct RawFrame {
 }
 
 /// Screencopy protocol state for wlr-screencopy-unstable-v1.
+#[derive(Default)]
 pub struct ScreencopyState {
     /// The screencopy manager global.
     pub manager: Option<ZwlrScreencopyManagerV1>,
@@ -258,21 +259,6 @@ pub struct ScreencopyState {
     pub shm: Option<WlShm>,
     /// Health event sender for capture metrics.
     pub health_tx: Option<crate::health::HealthSender>,
-}
-
-impl Default for ScreencopyState {
-    fn default() -> Self {
-        Self {
-            manager: None,
-            manager_version: 0,
-            frame_count: 0,
-            captures: HashMap::new(),
-            pipewire: None,
-            frame_tx: None,
-            shm: None,
-            health_tx: None,
-        }
-    }
 }
 
 impl ScreencopyState {

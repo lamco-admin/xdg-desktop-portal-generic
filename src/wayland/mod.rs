@@ -821,6 +821,11 @@ impl WaylandConnection {
     /// When `frame_tx` is provided, screencopy frames are sent through this
     /// channel instead of PipeWire. This bypasses PipeWire buffer sharing
     /// which doesn't work across separate PipeWire connections.
+    /// Return type for `spawn_event_loop_with_frame_channel`.
+    #[expect(
+        clippy::type_complexity,
+        reason = "multi-value return from event loop spawn"
+    )]
     pub fn spawn_event_loop_with_frame_channel(
         mut self,
         pipewire: Arc<PipeWireManager>,
@@ -861,6 +866,7 @@ impl WaylandConnection {
             "ext-capture handshake timeout configured"
         );
 
+        #[expect(clippy::expect_used, reason = "thread spawn failure is unrecoverable")]
         let handle = thread::Builder::new()
             .name("wayland-event-loop".to_string())
             .spawn(move || {
