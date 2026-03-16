@@ -153,6 +153,9 @@ pub enum InputProtocolType {
     WlrVirtual,
     /// EIS bridge (via reis crate)
     Eis,
+    /// Kernel-level uinput (/dev/uinput) pointer injection
+    #[cfg(feature = "uinput")]
+    Uinput,
 }
 
 /// Portal session state for health reporting.

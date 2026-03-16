@@ -25,6 +25,8 @@
 mod detection;
 mod eis_backend;
 mod eis_bridge;
+#[cfg(feature = "uinput")]
+pub mod uinput_backend;
 mod wlr_backend;
 
 use std::{os::unix::io::OwnedFd, path::PathBuf};
