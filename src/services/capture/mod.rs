@@ -13,7 +13,7 @@ pub mod detection;
 mod ext_backend;
 mod wlr_backend;
 
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 
 pub use detection::{AvailableCaptureProtocols, CaptureDetector};
 pub use ext_backend::ExtCaptureBackend;

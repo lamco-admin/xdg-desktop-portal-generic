@@ -8,7 +8,7 @@ use std::{
     collections::HashMap,
     io::Read,
     os::unix::io::{AsRawFd, OwnedFd},
-    sync::{mpsc, Arc, Mutex},
+    sync::{Arc, Mutex, mpsc},
 };
 
 use super::{ClipboardBackend, ClipboardProtocol};
@@ -203,7 +203,7 @@ fn read_pipe_data(read_fd: OwnedFd) -> Result<Option<Vec<u8>>> {
             events: libc::POLLIN,
             revents: 0,
         };
-        let poll_result = unsafe { libc::poll(&mut pollfd, 1, READ_TIMEOUT_MS) };
+        let poll_result = unsafe { libc::poll(&raw mut pollfd, 1, READ_TIMEOUT_MS) };
 
         if poll_result == 0 {
             tracing::warn!("Clipboard pipe read timed out after {}ms", READ_TIMEOUT_MS);

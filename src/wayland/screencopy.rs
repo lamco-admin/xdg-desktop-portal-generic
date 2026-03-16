@@ -17,13 +17,13 @@ use std::{
 };
 
 use wayland_client::{
+    QueueHandle,
     protocol::{
         wl_buffer::WlBuffer,
         wl_output::WlOutput,
         wl_shm::{self, WlShm},
         wl_shm_pool::WlShmPool,
     },
-    QueueHandle,
 };
 use wayland_protocols_wlr::screencopy::v1::client::{
     zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1,
@@ -138,7 +138,7 @@ impl ShmFrameBuffer {
 
     /// Create an anonymous memfd and set its size.
     fn create_memfd(size: usize) -> Result<OwnedFd, String> {
-        use nix::sys::memfd::{memfd_create, MFdFlags};
+        use nix::sys::memfd::{MFdFlags, memfd_create};
 
         let fd = memfd_create(
             c"xdp-screencopy",

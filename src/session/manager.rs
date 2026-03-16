@@ -446,25 +446,33 @@ mod tests {
             .unwrap();
 
         // Valid
-        assert!(manager
-            .validate_session(&handle, "com.example.app", ":1.123")
-            .is_ok());
+        assert!(
+            manager
+                .validate_session(&handle, "com.example.app", ":1.123")
+                .is_ok()
+        );
 
         // Wrong app
-        assert!(manager
-            .validate_session(&handle, "com.other.app", ":1.123")
-            .is_err());
+        assert!(
+            manager
+                .validate_session(&handle, "com.other.app", ":1.123")
+                .is_err()
+        );
 
         // Wrong sender
-        assert!(manager
-            .validate_session(&handle, "com.example.app", ":1.456")
-            .is_err());
+        assert!(
+            manager
+                .validate_session(&handle, "com.example.app", ":1.456")
+                .is_err()
+        );
 
         // Non-existent session
         let fake_handle = SessionManager::generate_session_handle();
-        assert!(manager
-            .validate_session(&fake_handle, "com.example.app", ":1.123")
-            .is_err());
+        assert!(
+            manager
+                .validate_session(&fake_handle, "com.example.app", ":1.123")
+                .is_err()
+        );
     }
 
     #[test]
@@ -502,14 +510,16 @@ mod tests {
 
         // Different app should work
         let handle = SessionManager::generate_session_handle();
-        assert!(manager
-            .create_session(
-                handle,
-                ":1.123".to_string(),
-                "com.other.app".to_string(),
-                PersistMode::None,
-            )
-            .is_ok());
+        assert!(
+            manager
+                .create_session(
+                    handle,
+                    ":1.123".to_string(),
+                    "com.other.app".to_string(),
+                    PersistMode::None,
+                )
+                .is_ok()
+        );
     }
 
     #[test]

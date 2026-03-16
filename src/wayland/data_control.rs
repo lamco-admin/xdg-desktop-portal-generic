@@ -42,7 +42,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use wayland_client::{protocol::wl_seat::WlSeat, QueueHandle};
+use wayland_client::{QueueHandle, protocol::wl_seat::WlSeat};
 use wayland_protocols::ext::data_control::v1::client::{
     ext_data_control_device_v1::ExtDataControlDeviceV1,
     ext_data_control_manager_v1::ExtDataControlManagerV1,

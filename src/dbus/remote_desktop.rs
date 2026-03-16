@@ -23,7 +23,7 @@ use zbus::{
     zvariant::{Fd, ObjectPath, OwnedValue, Value},
 };
 
-use super::{empty_results, get_option_bool, get_option_u32, Response};
+use super::{Response, empty_results, get_option_bool, get_option_u32};
 use crate::{
     error::PortalError,
     pipewire::PipeWireManager,
@@ -129,10 +129,6 @@ impl RemoteDesktopInterface {
     }
 }
 
-#[allow(
-    clippy::used_underscore_binding,
-    reason = "zbus macro generates code using underscore-prefixed parameters"
-)]
 #[interface(name = "org.freedesktop.impl.portal.RemoteDesktop")]
 impl RemoteDesktopInterface {
     /// Create a new `RemoteDesktop` session.
@@ -1070,7 +1066,7 @@ impl RemoteDesktopInterface {
     reason = "CLOCK_MONOTONIC tv_sec and tv_nsec are always non-negative"
 )]
 fn current_time_usec() -> u64 {
-    use nix::time::{clock_gettime, ClockId};
+    use nix::time::{ClockId, clock_gettime};
     match clock_gettime(ClockId::CLOCK_MONOTONIC) {
         Ok(ts) => ts.tv_sec() as u64 * 1_000_000 + ts.tv_nsec() as u64 / 1_000,
         Err(_) => 0,

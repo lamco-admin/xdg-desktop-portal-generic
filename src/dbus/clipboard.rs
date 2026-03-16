@@ -6,8 +6,8 @@ use std::{
     collections::HashMap,
     os::unix::io::{AsRawFd, FromRawFd, OwnedFd},
     sync::{
-        atomic::{AtomicU32, Ordering},
         Arc,
+        atomic::{AtomicU32, Ordering},
     },
 };
 
@@ -157,10 +157,6 @@ impl ClipboardInterface {
     }
 }
 
-#[allow(
-    clippy::used_underscore_binding,
-    reason = "zbus macro expands to use underscore-prefixed D-Bus parameters"
-)]
 #[interface(name = "org.freedesktop.impl.portal.Clipboard")]
 impl ClipboardInterface {
     /// Request clipboard access for a session.
@@ -221,7 +217,7 @@ impl ClipboardInterface {
         drop(manager);
 
         // Set clipboard via backend
-        if let Some(ref backend) = self.clipboard_backend {
+        if let Some(backend) = &self.clipboard_backend {
             let mut backend = backend.lock().await;
             backend
                 .set_clipboard(ClipboardData {
@@ -305,7 +301,7 @@ impl ClipboardInterface {
         drop(manager);
 
         // Read from clipboard backend
-        let data = if let Some(ref backend) = self.clipboard_backend {
+        let data = if let Some(backend) = &self.clipboard_backend {
             let backend = backend.lock().await;
             let clipboard = backend
                 .get_clipboard()
@@ -372,7 +368,7 @@ impl ClipboardInterface {
 
         // If write was successful and we have data, update the clipboard backend
         if success {
-            if let (Some(entry), Some(ref backend)) = (&entry, &self.clipboard_backend) {
+            if let (Some(entry), Some(backend)) = (&entry, &self.clipboard_backend) {
                 if let Some(ref data) = entry.data {
                     let mut backend = backend.lock().await;
                     // Update the backend's source data for this MIME type
@@ -392,7 +388,7 @@ impl ClipboardInterface {
         }
 
         // Notify the clipboard backend
-        if let Some(ref backend) = self.clipboard_backend {
+        if let Some(backend) = &self.clipboard_backend {
             let mut backend = backend.lock().await;
             backend
                 .write_done(serial, success)

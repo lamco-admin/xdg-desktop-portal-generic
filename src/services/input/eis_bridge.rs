@@ -29,7 +29,7 @@ use std::{collections::HashMap, os::unix::io::OwnedFd};
 use reis::request::EisRequest;
 
 use super::{
-    eis_backend::EisSession, wlr_backend::WlrInputBackend, InputBackend, InputProtocol, WlrConfig,
+    InputBackend, InputProtocol, WlrConfig, eis_backend::EisSession, wlr_backend::WlrInputBackend,
 };
 use crate::{
     error::{PortalError, Result},

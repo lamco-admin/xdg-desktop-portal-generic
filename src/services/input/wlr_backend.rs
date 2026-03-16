@@ -17,11 +17,11 @@ use std::{
 };
 
 use wayland_client::{
-    globals::{registry_queue_init, GlobalList, GlobalListContents},
+    Connection, Dispatch, EventQueue, QueueHandle,
+    globals::{GlobalList, GlobalListContents, registry_queue_init},
     protocol::{
         wl_pointer::ButtonState as WlButtonState, wl_registry::WlRegistry, wl_seat::WlSeat,
     },
-    Connection, Dispatch, EventQueue, QueueHandle,
 };
 use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::{
     zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1,

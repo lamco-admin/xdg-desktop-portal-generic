@@ -135,7 +135,7 @@ impl PipeWireVideoStream {
     /// - framerate = num/1
     fn build_video_format_pod(width: u32, height: u32, framerate: u32) -> Option<Vec<u8>> {
         use libspa::{
-            pod::{self, serialize::PodSerializer, Value},
+            pod::{self, Value, serialize::PodSerializer},
             utils::Id,
         };
 

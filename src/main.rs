@@ -5,16 +5,16 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 use xdg_desktop_portal_generic::{
+    PortalBackend,
     pipewire::PipeWireManager,
     services::{
-        capture::{create_capture_backend, CapturePreference},
-        clipboard::{create_clipboard_backend, ClipboardPreference},
-        input::{create_input_backend, InputBackendConfig},
+        capture::{CapturePreference, create_capture_backend},
+        clipboard::{ClipboardPreference, create_clipboard_backend},
+        input::{InputBackendConfig, create_input_backend},
     },
     wayland::WaylandConnection,
-    PortalBackend,
 };
 
 #[tokio::main]

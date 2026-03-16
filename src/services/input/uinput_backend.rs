@@ -17,8 +17,8 @@
 use std::path::Path;
 
 use evdev::{
-    uinput::VirtualDevice, AbsInfo, AbsoluteAxisCode, AttributeSet, BusType, InputEvent, InputId,
-    RelativeAxisCode, UinputAbsSetup,
+    AbsInfo, AbsoluteAxisCode, AttributeSet, BusType, InputEvent, InputId, RelativeAxisCode,
+    UinputAbsSetup, uinput::VirtualDevice,
 };
 
 use super::InputBackend;
@@ -204,7 +204,10 @@ impl InputBackend for UinputPointerBackend {
         Ok(())
     }
 
-    #[allow(clippy::match_same_arms)]
+    #[expect(
+        clippy::match_same_arms,
+        reason = "each arm has distinct semantic meaning"
+    )]
     fn inject_event(&mut self, _session_id: &str, event: PortalInputEvent) -> Result<()> {
         match event {
             PortalInputEvent::Pointer(PointerEvent::MotionAbsolute { x, y, .. }) => {

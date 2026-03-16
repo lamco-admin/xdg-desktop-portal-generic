@@ -23,8 +23,9 @@ use std::{
     collections::HashMap,
     os::unix::io::OwnedFd,
     sync::{
+        Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc,
+        mpsc,
     },
     thread,
     time::Duration,

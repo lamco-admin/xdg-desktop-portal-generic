@@ -22,8 +22,9 @@ pub mod screencopy;
 use std::{
     os::unix::io::{AsFd, AsRawFd},
     sync::{
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc, Mutex,
+        mpsc,
     },
     thread,
 };
@@ -33,9 +34,9 @@ pub use data_control::{ClipboardCommand, SharedClipboardState};
 pub use dispatch::{OutputInfo, WaylandState};
 pub use globals::AvailableProtocols;
 use wayland_client::{
-    globals::{registry_queue_init, GlobalList},
-    protocol::{wl_output::WlOutput, wl_seat::WlSeat, wl_shm::WlShm},
     Connection, EventQueue, QueueHandle,
+    globals::{GlobalList, registry_queue_init},
+    protocol::{wl_output::WlOutput, wl_seat::WlSeat, wl_shm::WlShm},
 };
 use wayland_protocols::ext::{
     data_control::v1::client::ext_data_control_manager_v1::ExtDataControlManagerV1,
@@ -591,7 +592,7 @@ impl WaylandConnection {
                 unsafe_code,
                 reason = "poll() is a standard POSIX syscall with a valid local pollfd struct"
             )]
-            let poll_result = unsafe { libc::poll(&mut pollfd, 1, 100) };
+            let poll_result = unsafe { libc::poll(&raw mut pollfd, 1, 100) };
 
             if poll_result < 0 {
                 let err = std::io::Error::last_os_error();

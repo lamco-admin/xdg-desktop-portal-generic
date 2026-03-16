@@ -210,10 +210,12 @@ mod tests {
 
         let result = ProtocolDetector::select(&config, &available);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("No input protocols"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("No input protocols")
+        );
     }
 
     #[test]

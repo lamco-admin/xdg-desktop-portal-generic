@@ -77,7 +77,7 @@ pub mod wayland;
 // Re-export main types
 use std::{
     collections::HashMap,
-    sync::{mpsc, Arc},
+    sync::{Arc, mpsc},
 };
 
 pub use error::{PortalError, Result};
@@ -86,9 +86,9 @@ pub use services::capture::{CaptureBackend, CaptureDetector, CapturePreference, 
 pub use services::{
     clipboard::{ClipboardBackend, ClipboardPreference, ClipboardProtocol},
     input::{
-        create_input_backend, AvailableProtocols, EisBridgeBackend, EisConfig, EisSession,
-        InputBackend, InputBackendConfig, InputProtocol, ProtocolDetector, WlrConfig,
-        WlrInputBackend,
+        AvailableProtocols, EisBridgeBackend, EisConfig, EisSession, InputBackend,
+        InputBackendConfig, InputProtocol, ProtocolDetector, WlrConfig, WlrInputBackend,
+        create_input_backend,
     },
 };
 pub use session::{PersistMode, RestoreData, Session, SessionManager, SessionState};

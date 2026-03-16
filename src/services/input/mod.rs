@@ -91,7 +91,7 @@ pub trait InputBackend: Send + Sync {
     /// * `Ok(Some(fd))` - EIS protocol: fd to pass to client via D-Bus
     /// * `Ok(None)` - wlr protocol: no fd needed, use `inject_event()` instead
     fn create_context(&mut self, session_id: &str, devices: DeviceTypes)
-        -> Result<Option<OwnedFd>>;
+    -> Result<Option<OwnedFd>>;
 
     /// Destroy an input context for a session.
     ///

@@ -30,11 +30,11 @@ use std::{
 };
 
 use wayland_client::{
+    QueueHandle,
     protocol::{
         wl_output::WlOutput,
         wl_shm::{self, WlShm},
     },
-    QueueHandle,
 };
 use wayland_protocols::ext::{
     image_capture_source::v1::client::{

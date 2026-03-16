@@ -7,12 +7,12 @@
 use std::sync::{Arc, Mutex};
 
 use wayland_client::{
+    Connection, Dispatch, QueueHandle,
     globals::GlobalListContents,
     protocol::{
         wl_buffer::WlBuffer, wl_output::WlOutput, wl_registry::WlRegistry, wl_seat::WlSeat,
         wl_shm::WlShm, wl_shm_pool::WlShmPool,
     },
-    Connection, Dispatch, QueueHandle,
 };
 use wayland_protocols::ext::{
     data_control::v1::client::{
@@ -261,7 +261,7 @@ impl Dispatch<WlOutput, Arc<Mutex<OutputInfo>>> for WaylandState {
                     height,
                     refresh,
                 } => {
-                    use wayland_client::{protocol::wl_output::Mode, WEnum};
+                    use wayland_client::{WEnum, protocol::wl_output::Mode};
                     // Only use current mode
                     if let WEnum::Value(f) = flags {
                         if f.contains(Mode::Current) {

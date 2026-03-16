@@ -10,7 +10,7 @@ use zbus::{
     zvariant::{self, ObjectPath, OwnedValue, Value},
 };
 
-use super::{empty_results, get_option_bool, get_option_u32, Response};
+use super::{Response, empty_results, get_option_bool, get_option_u32};
 use crate::{
     error::PortalError,
     pipewire::PipeWireManager,
@@ -164,10 +164,6 @@ impl ScreenCastInterface {
     }
 }
 
-#[allow(
-    clippy::used_underscore_binding,
-    reason = "zbus macro expands to use underscore-prefixed D-Bus parameters"
-)]
 #[interface(name = "org.freedesktop.impl.portal.ScreenCast")]
 impl ScreenCastInterface {
     /// Create a new `ScreenCast` session.

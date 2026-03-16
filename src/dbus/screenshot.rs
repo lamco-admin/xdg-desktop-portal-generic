@@ -10,7 +10,7 @@
 
 use std::{
     collections::HashMap,
-    sync::{mpsc, Arc},
+    sync::{Arc, mpsc},
 };
 
 use tokio::sync::Mutex;
@@ -19,7 +19,7 @@ use zbus::{
     zvariant::{ObjectPath, OwnedValue, Value},
 };
 
-use super::{empty_results, get_option_bool, Response};
+use super::{Response, empty_results, get_option_bool};
 use crate::{
     services::capture::CaptureBackend,
     types::SourceType,
@@ -47,10 +47,6 @@ impl ScreenshotInterface {
     }
 }
 
-#[allow(
-    clippy::used_underscore_binding,
-    reason = "zbus macro expands to use underscore-prefixed D-Bus parameters"
-)]
 #[interface(name = "org.freedesktop.impl.portal.Screenshot")]
 impl ScreenshotInterface {
     /// Capture a screenshot of the screen.
@@ -566,9 +562,11 @@ mod tests {
 
         let uri = encode_and_save_png(&screenshot).expect("PNG encoding should succeed");
         assert!(uri.starts_with("file:///"));
-        assert!(std::path::Path::new(&uri)
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("png")));
+        assert!(
+            std::path::Path::new(&uri)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("png"))
+        );
 
         // Verify the file exists
         let path = uri

@@ -19,7 +19,7 @@ mod settings;
 use std::collections::HashMap;
 
 pub use clipboard::{
-    next_clipboard_serial, ClipboardInterface, ClipboardSignal, PendingWriteEntry, PendingWrites,
+    ClipboardInterface, ClipboardSignal, PendingWriteEntry, PendingWrites, next_clipboard_serial,
 };
 pub use remote_desktop::RemoteDesktopInterface;
 pub use request::RequestInterface;

@@ -12,7 +12,7 @@
 mod ext_backend;
 mod wlr_backend;
 
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 
 pub use ext_backend::ExtClipboardBackend;
 pub use wlr_backend::WlrClipboardBackend;

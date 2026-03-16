@@ -28,10 +28,9 @@ use std::os::unix::{
 
 use enumflags2::BitFlags;
 use reis::{
-    eis,
+    PendingRequestResult, eis,
     handshake::{EisHandshakeResp, EisHandshaker},
     request::{Device, DeviceCapability, EisRequest, EisRequestConverter, Seat},
-    PendingRequestResult,
 };
 
 use crate::{

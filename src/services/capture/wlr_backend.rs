@@ -5,7 +5,7 @@
 
 use std::{
     collections::HashMap,
-    sync::{mpsc, Arc},
+    sync::{Arc, mpsc},
 };
 
 use super::{CaptureBackend, CaptureProtocol};

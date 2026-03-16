@@ -10,6 +10,9 @@ compositor that implements standard ext- or wlr- protocols.
 Connects as a **standalone Wayland client** -- no compositor-side code changes
 or custom traits required.
 
+Developed by [Lamco Development](https://lamco.ai) as part of the
+[lamco-rdp-server](https://github.com/lamco-admin/lamco-rdp-server) ecosystem.
+
 ## Supported Portals
 
 | Portal Interface | Version | Primary Protocol | Fallback |
