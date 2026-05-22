@@ -247,8 +247,16 @@ pub struct ScreencopyState {
     /// Protocol version of the bound manager (1, 2, or 3).
     /// v3 adds `buffer_done` and `linux_dmabuf` events.
     pub manager_version: u32,
-    /// Total frames delivered (for periodic logging).
+    /// Total `ready` events received from the compositor (includes ready events
+    /// that early-return without emitting, e.g., missing capture entry or shm buffer).
     frame_count: u64,
+    /// Subset of `frame_count` for which a frame was successfully sent on the
+    /// direct frame channel. Compared against `frame_count` this surfaces any
+    /// portal-generic-internal loss; compared against the downstream consumer's
+    /// drop counter it confirms or refutes "frames lost before reaching consumer."
+    /// Tracks the wlr-screencopy direct-channel path only; PipeWire path has
+    /// its own queue metrics, and the screenshot reply path is one-shot.
+    frames_sent_to_channel: u64,
     /// Active captures, keyed by PipeWire node ID.
     pub captures: HashMap<u32, ActiveCapture>,
     /// Reference to the PipeWire manager for sending frame data.
@@ -487,6 +495,7 @@ impl ScreencopyState {
             tracing::debug!(
                 node_id,
                 frame_count = self.frame_count,
+                frames_sent_to_channel = self.frames_sent_to_channel,
                 capture_latency_us = capture_latency.map(|d| d.as_micros() as u64),
                 "Screencopy frame ready"
             );
@@ -549,6 +558,7 @@ impl ScreencopyState {
                 if tx.send(frame).is_err() {
                     tracing::warn!(node_id, "Direct frame channel closed");
                 } else {
+                    self.frames_sent_to_channel += 1;
                     tracing::trace!(node_id, width, height, "Sent frame via direct channel");
                 }
             } else if let Some(pw) = &self.pipewire {
