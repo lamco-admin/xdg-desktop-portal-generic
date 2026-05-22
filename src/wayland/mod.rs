@@ -407,24 +407,17 @@ impl WaylandConnection {
                         protocols.ext_image_copy_capture = true;
                         tracing::debug!("Found ext_image_copy_capture_manager_v1");
                     }
-                    "zwlr_screencopy_manager_v1" => {
-                        // Bound above via globals.bind(); flag already set there.
-                        // Only set the flag here if binding failed (detection only).
-                        if !protocols.wlr_screencopy {
-                            tracing::debug!("Found zwlr_screencopy_manager_v1 (not bound)");
-                        }
+                    // For data-control + screencopy detections below: the global
+                    // is bound above via globals.bind() and the flag set there.
+                    // These arms only fire when binding failed (detection only).
+                    "zwlr_screencopy_manager_v1" if !protocols.wlr_screencopy => {
+                        tracing::debug!("Found zwlr_screencopy_manager_v1 (not bound)");
                     }
-                    "ext_data_control_manager_v1" => {
-                        // Already handled above via globals.bind()
-                        if !protocols.ext_data_control {
-                            tracing::debug!("Found ext_data_control_manager_v1 (not bound)");
-                        }
+                    "ext_data_control_manager_v1" if !protocols.ext_data_control => {
+                        tracing::debug!("Found ext_data_control_manager_v1 (not bound)");
                     }
-                    "zwlr_data_control_manager_v1" => {
-                        // Already handled above via globals.bind()
-                        if !protocols.wlr_data_control {
-                            tracing::debug!("Found zwlr_data_control_manager_v1 (not bound)");
-                        }
+                    "zwlr_data_control_manager_v1" if !protocols.wlr_data_control => {
+                        tracing::debug!("Found zwlr_data_control_manager_v1 (not bound)");
                     }
                     _ => {}
                 }

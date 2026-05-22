@@ -167,28 +167,31 @@ impl Dispatch<WlRegistry, GlobalListContents> for WaylandState {
         use wayland_client::protocol::wl_registry::Event;
 
         match event {
+            // Handle new wl_output globals (output hotplug). Initial binding
+            // happens at startup; this only fires after `state.initialized`.
             Event::Global {
                 name,
                 interface,
                 version,
-            } => {
-                // Handle new wl_output globals (output hotplug)
-                if interface == "wl_output" && state.initialized {
-                    tracing::info!(name, version, "New wl_output global detected (hotplug)");
-                    let info = Arc::new(Mutex::new(OutputInfo {
-                        global_name: name,
-                        ..Default::default()
-                    }));
-                    let bind_version = version.min(4);
-                    let output: WlOutput = registry.bind(name, bind_version, qh, info.clone());
-                    state.outputs.push((output, info));
-                }
+            } if interface == "wl_output" && state.initialized => {
+                tracing::info!(name, version, "New wl_output global detected (hotplug)");
+                let info = Arc::new(Mutex::new(OutputInfo {
+                    global_name: name,
+                    ..Default::default()
+                }));
+                let bind_version = version.min(4);
+                let output: WlOutput = registry.bind(name, bind_version, qh, info.clone());
+                state.outputs.push((output, info));
             }
+            // Other Event::Global cases (pre-initialization, non-wl_output)
+            // are handled by the wildcard arm below; initial binding for them
+            // happens in WaylandConnection::new().
             Event::GlobalRemove { name } => {
                 // Handle removed wl_output globals (output unplug)
-                let idx = state.outputs.iter().position(|(_, info)| {
-                    info.lock().map(|i| i.global_name == name).unwrap_or(false)
-                });
+                let idx = state
+                    .outputs
+                    .iter()
+                    .position(|(_, info)| info.lock().is_ok_and(|i| i.global_name == name));
                 if let Some(idx) = idx {
                     let (output, info) = state.outputs.remove(idx);
                     let output_name = info
