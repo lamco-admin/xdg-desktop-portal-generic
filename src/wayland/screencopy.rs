@@ -215,6 +215,16 @@ pub struct ActiveCapture {
     pub pending_format: Option<BufferFormatInfo>,
     /// Whether we've received `buffer_done` (v3) for the current frame.
     pub buffer_done_received: bool,
+    /// Whether `frame.copy()` has already been sent for the current frame.
+    ///
+    /// `zwlr_screencopy_frame_v1` is one-shot: `copy()` may be called exactly
+    /// once per frame object. On v1/v2 (no `buffer_done` event) the
+    /// `on_frame_buffer` handler invokes `allocate_and_copy` for every
+    /// `buffer` event, and the protocol permits multiple `buffer` events per
+    /// frame for SHM format enumeration. This flag prevents the second event
+    /// from issuing a redundant `copy()` on an already-copied frame object,
+    /// which would be a protocol violation. Reset in `request_next_frame`.
+    pub copy_sent: bool,
     /// If set, this is a one-shot screenshot capture. The reply channel
     /// receives the pixel data when the frame is ready, and the capture
     /// is removed (no next-frame loop).
@@ -312,6 +322,7 @@ impl ScreencopyState {
             pending_frame: Some(frame),
             pending_format: None,
             buffer_done_received: false,
+            copy_sent: false,
             screenshot_reply: None,
             capture_started: None,
         };
@@ -355,6 +366,7 @@ impl ScreencopyState {
             pending_frame: Some(frame),
             pending_format: None,
             buffer_done_received: false,
+            copy_sent: false,
             screenshot_reply: Some(reply),
             capture_started: None,
         };
@@ -468,10 +480,20 @@ impl ScreencopyState {
             }
         }
 
-        // Copy: tell the compositor to write into our buffer
+        // Copy: tell the compositor to write into our buffer.
+        // Guard against re-issuing `copy()` on a frame object that already
+        // received one. The wlr-screencopy state machine permits multiple
+        // `buffer` events per frame (SHM format enumeration on v1/v2 where
+        // there's no `buffer_done` to delimit), so this handler can be
+        // entered repeatedly; the protocol only allows ONE `copy()` per
+        // frame object.
+        if capture.copy_sent {
+            return;
+        }
         if let (Some(frame), Some(buf)) = (&capture.pending_frame, &capture.shm_buffer) {
             capture.capture_started = Some(std::time::Instant::now());
             frame.copy(&buf.buffer);
+            capture.copy_sent = true;
             tracing::trace!(node_id, "Sent frame.copy() to compositor");
         }
     }
@@ -630,6 +652,7 @@ impl ScreencopyState {
         // Reset per-frame state
         capture.pending_format = None;
         capture.buffer_done_received = false;
+        capture.copy_sent = false;
 
         // Request next frame
         let cursor = i32::from(capture.cursor_overlay);
