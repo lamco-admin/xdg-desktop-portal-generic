@@ -376,14 +376,27 @@ impl WlrInputBackend {
 
     /// Flush the Wayland connection.
     ///
-    /// If this fails, the Wayland connection is likely broken (compositor
-    /// crash, fd closed, etc.). Callers should propagate the error so that
-    /// the session can be cleaned up rather than silently continuing.
+    /// EAGAIN/WouldBlock is transient (compositor's socket buffer is full;
+    /// the data we wrote stays buffered in wayland-client and will be sent
+    /// on the next flush) and must NOT be treated as a permanent failure.
+    /// Other errors indicate a broken connection (compositor crash, fd
+    /// closed, etc.) and are propagated for session cleanup. Mirrors the
+    /// equivalent fix applied to src/wayland/mod.rs in commit 8326a30.
     fn flush(&self) -> Result<()> {
-        self.connection.flush().map_err(|e| {
-            PortalError::Wayland(format!("flush failed (connection may be broken): {e}"))
-        })?;
-        Ok(())
+        match self.connection.flush() {
+            Ok(()) => Ok(()),
+            Err(wayland_client::backend::WaylandError::Io(ref e))
+                if e.kind() == std::io::ErrorKind::WouldBlock =>
+            {
+                tracing::trace!(
+                    "wlr input: Wayland flush returned WouldBlock, data buffered for next flush"
+                );
+                Ok(())
+            }
+            Err(e) => Err(PortalError::Wayland(format!(
+                "flush failed (connection may be broken): {e}"
+            ))),
+        }
     }
 }
 
