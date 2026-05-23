@@ -222,11 +222,25 @@ pub enum PointerEvent {
         time_usec: u64,
     },
     /// Absolute motion (for tablets, touchpads in absolute mode).
+    ///
+    /// `x` and `y` are pixel coordinates within a logical frame of size
+    /// (`x_extent`, `y_extent`). The backend normalizes internally:
+    /// `nx = x / x_extent`, `ny = y / y_extent`, clamped to `[0, 1]`.
+    ///
+    /// When `x_extent == 0` (or `y_extent == 0`), the corresponding `x`
+    /// (or `y`) is treated as already-normalized `[0, 1]` — this preserves
+    /// the legacy D-Bus contract for callers that haven't been updated.
     MotionAbsolute {
-        /// Absolute X coordinate (0.0 to 1.0, normalized).
+        /// Absolute X coordinate, in pixels within the source frame
+        /// (or normalized `[0, 1]` when `x_extent == 0`).
         x: f64,
-        /// Absolute Y coordinate (0.0 to 1.0, normalized).
+        /// Absolute Y coordinate, in pixels within the source frame
+        /// (or normalized `[0, 1]` when `y_extent == 0`).
         y: f64,
+        /// Width of the source frame in pixels, or `0` if `x` is normalized.
+        x_extent: u32,
+        /// Height of the source frame in pixels, or `0` if `y` is normalized.
+        y_extent: u32,
         /// Stream ID for multi-monitor setups.
         stream: u32,
         /// Event timestamp in microseconds.

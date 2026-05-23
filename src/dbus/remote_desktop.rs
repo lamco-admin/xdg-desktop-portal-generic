@@ -586,6 +586,11 @@ impl RemoteDesktopInterface {
             InputEvent::Pointer(PointerEvent::MotionAbsolute {
                 x,
                 y,
+                // D-Bus NotifyPointerMotionAbsolute spec defines x,y as already
+                // normalized [0,1]; the stream_mappings table supplies the
+                // output geometry. Signal with 0 extents to keep that contract.
+                x_extent: 0,
+                y_extent: 0,
                 stream,
                 time_usec: current_time_usec(),
             }),

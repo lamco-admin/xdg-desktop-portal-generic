@@ -83,9 +83,15 @@ impl EisBridgeBackend {
             })),
 
             EisRequest::PointerMotionAbsolute(m) => {
+                // EIS absolute coords are in device-region pixels; we don't have
+                // that region here, so signal "already normalized" with 0 extents.
+                // libei callers that need correct multi-monitor mapping must use
+                // the wlr backend path with explicit extents.
                 Some(InputEvent::Pointer(PointerEvent::MotionAbsolute {
                     x: f64::from(m.dx_absolute),
                     y: f64::from(m.dy_absolute),
+                    x_extent: 0,
+                    y_extent: 0,
                     stream: 0,
                     time_usec: m.time,
                 }))

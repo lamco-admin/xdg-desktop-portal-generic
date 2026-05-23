@@ -492,36 +492,62 @@ impl InputBackend for WlrInputBackend {
             InputEvent::Pointer(PointerEvent::MotionAbsolute {
                 x,
                 y,
+                x_extent,
+                y_extent,
                 stream,
                 time_usec,
             }) => {
                 if let Some(ref pointer) = ctx.pointer {
-                    // If we have a stream mapping, translate normalized coordinates
-                    // to compositor-global absolute position. Otherwise fall back to
-                    // simple normalized-to-extent mapping.
-                    if let Some(mapping) = self.stream_mappings.get(&stream) {
-                        // x,y are normalized 0.0–1.0 within this stream's output.
-                        // Convert to pixel position within the output, then add the
-                        // output's global offset.
-                        let pixel_x = mapping.x as f64 + x * mapping.width as f64;
-                        let pixel_y = mapping.y as f64 + y * mapping.height as f64;
-
-                        // Compute total compositor extent from all known outputs.
-                        let (total_width, total_height) = self.compute_total_extent();
-
-                        // Normalize to extent range for wlr_virtual_pointer protocol.
-                        let extent = 10000u32;
-                        let abs_x = ((pixel_x / total_width as f64) * extent as f64) as u32;
-                        let abs_y = ((pixel_y / total_height as f64) * extent as f64) as u32;
-
-                        pointer.motion_absolute(time_ms(time_usec), abs_x, abs_y, extent, extent);
+                    // Normalize caller input to [0,1] within the source frame.
+                    // x_extent==0 means caller already normalized (legacy D-Bus path).
+                    let nx = if x_extent == 0 {
+                        x
                     } else {
-                        // No mapping: treat x,y as normalized over the whole output
-                        let extent = 10000u32;
-                        let abs_x = (x * extent as f64) as u32;
-                        let abs_y = (y * extent as f64) as u32;
-                        pointer.motion_absolute(time_ms(time_usec), abs_x, abs_y, extent, extent);
-                    }
+                        x / f64::from(x_extent)
+                    };
+                    let ny = if y_extent == 0 {
+                        y
+                    } else {
+                        y / f64::from(y_extent)
+                    };
+                    let nx = nx.clamp(0.0, 1.0);
+                    let ny = ny.clamp(0.0, 1.0);
+
+                    let extent = 10000u32;
+                    let mapping_hit = self.stream_mappings.contains_key(&stream);
+                    let (abs_x, abs_y) = if let Some(mapping) = self.stream_mappings.get(&stream) {
+                        // Translate normalized stream coords to compositor-global pixels
+                        // (output position + normalized * output size), then re-normalize
+                        // against total compositor extent for the wlr protocol.
+                        let pixel_x = f64::from(mapping.x) + nx * f64::from(mapping.width);
+                        let pixel_y = f64::from(mapping.y) + ny * f64::from(mapping.height);
+                        let (total_w, total_h) = self.compute_total_extent();
+                        let ax = ((pixel_x / f64::from(total_w)) * f64::from(extent)) as u32;
+                        let ay = ((pixel_y / f64::from(total_h)) * f64::from(extent)) as u32;
+                        (ax, ay)
+                    } else {
+                        // No mapping: project normalized coords directly to wlr extent.
+                        let ax = (nx * f64::from(extent)) as u32;
+                        let ay = (ny * f64::from(extent)) as u32;
+                        (ax, ay)
+                    };
+
+                    tracing::trace!(
+                        x_in = x,
+                        y_in = y,
+                        x_extent,
+                        y_extent,
+                        stream,
+                        nx,
+                        ny,
+                        abs_x,
+                        abs_y,
+                        wlr_extent = extent,
+                        mapping_hit,
+                        "wlr inject MotionAbsolute"
+                    );
+
+                    pointer.motion_absolute(time_ms(time_usec), abs_x, abs_y, extent, extent);
                     pointer.frame();
                 }
             }
