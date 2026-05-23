@@ -52,10 +52,9 @@ use crate::{
 /// access), this is safe.
 struct XkbData {
     keymap: xkbcommon::xkb::Keymap,
-    #[expect(
-        dead_code,
-        reason = "state is kept alive alongside keymap for future modifier tracking"
-    )]
+    /// Live xkb state — updated on every keyboard key event so the serialized
+    /// modifier mask sent to virtual-keyboard `modifiers()` reflects the
+    /// current depressed/latched/locked set.
     state: xkbcommon::xkb::State,
     keymap_string: String,
 }
@@ -628,10 +627,40 @@ impl InputBackend for WlrInputBackend {
                 time_usec,
             }) => {
                 if let Some(ref keyboard) = ctx.keyboard {
+                    use xkbcommon::xkb;
+
                     let wl_state = match state {
                         KeyState::Pressed => 1u32,
                         KeyState::Released => 0u32,
                     };
+
+                    // Run the event through xkb state so we can serialize the
+                    // current modifier mask, then emit modifiers() BEFORE key()
+                    // so xkb-aware consumers see the modifier as held while the
+                    // key arrives. Without modifiers(), key(c) with Ctrl held
+                    // arrives as bare 'c' — observed in the field as Ctrl+C
+                    // producing "C" in a terminal.
+                    //
+                    // xkbcommon's update_key takes xkb keycodes (evdev + 8);
+                    // the virtual-keyboard protocol's key() takes evdev keycodes
+                    // (the compositor adds 8 internally for keymap lookup).
+                    if let Some(xkb_data) = self.state.xkb.as_mut() {
+                        let direction = match state {
+                            KeyState::Pressed => xkb::KeyDirection::Down,
+                            KeyState::Released => xkb::KeyDirection::Up,
+                        };
+                        let xkb_keycode: xkb::Keycode = (keycode.saturating_add(8)).into();
+                        xkb_data.state.update_key(xkb_keycode, direction);
+
+                        let mods_depressed =
+                            xkb_data.state.serialize_mods(xkb::STATE_MODS_DEPRESSED);
+                        let mods_latched = xkb_data.state.serialize_mods(xkb::STATE_MODS_LATCHED);
+                        let mods_locked = xkb_data.state.serialize_mods(xkb::STATE_MODS_LOCKED);
+                        let group = xkb_data.state.serialize_layout(xkb::STATE_LAYOUT_EFFECTIVE);
+
+                        keyboard.modifiers(mods_depressed, mods_latched, mods_locked, group);
+                    }
+
                     keyboard.key(time_ms(time_usec), keycode, wl_state);
                 }
             }
