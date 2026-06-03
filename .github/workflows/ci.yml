@@ -4,37 +4,88 @@ on:
   push:
     branches: [master]
   pull_request:
-    branches: [master]
+
+env:
+  CARGO_TERM_COLOR: always
+  MSRV: "1.85"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  test:
+  fmt:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
 
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libpipewire-0.3-dev \
-            libspa-0.2-dev \
-            libwayland-dev \
-            libxkbcommon-dev \
-            libclang-dev
+            libpipewire-0.3-dev libspa-0.2-dev libwayland-dev libxkbcommon-dev libclang-dev
+      - run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: Build
-        run: cargo build --all-features
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libpipewire-0.3-dev libspa-0.2-dev libwayland-dev libxkbcommon-dev libclang-dev
+      - run: cargo test --all-features
 
-      - name: Run tests
-        run: cargo test --all-features
+  doc:
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libpipewire-0.3-dev libspa-0.2-dev libwayland-dev libxkbcommon-dev libclang-dev
+      - run: cargo doc --no-deps --all-features
 
-      - name: Clippy
-        run: cargo clippy --all-features
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.MSRV }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libpipewire-0.3-dev libspa-0.2-dev libwayland-dev libxkbcommon-dev libclang-dev
+      - run: cargo build --all-features
 
-      - name: Check formatting
-        run: cargo fmt --all --check
-
-      - name: Build documentation
-        run: cargo doc --no-deps
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - run: cargo deny --config .cargo/deny.toml check

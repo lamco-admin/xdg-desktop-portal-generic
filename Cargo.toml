@@ -4,8 +4,7 @@ version = "0.3.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
-authors = ["Greg Lamberson <greg@lamco.io>"]
-description = "Generic XDG Desktop Portal backend for Wayland compositors, by Lamco Development"
+description = "Generic XDG Desktop Portal backend for Wayland compositors, by Lamco Development LLC"
 repository = "https://github.com/lamco-admin/xdg-desktop-portal-generic"
 homepage = "https://www.lamco.ai"
 keywords = ["wayland", "portal", "screencopy", "input", "clipboard"]
@@ -20,6 +19,8 @@ exclude = [
     ".editorconfig",
     "Makefile",
     "clippy.toml",
+    "about.toml",
+    "about.hbs",
 ]
 
 [badges]
