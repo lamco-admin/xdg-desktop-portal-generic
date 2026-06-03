@@ -162,12 +162,22 @@ pub struct ExtCaptureState {
     pub captures: HashMap<u32, ActiveExtCapture>,
     /// Reference to the PipeWire manager for sending frame data.
     pub pipewire: Option<Arc<PipeWireManager>>,
+    /// Direct frame channel for in-process consumers (bypasses PipeWire).
+    /// Mirrors `ScreencopyState::frame_tx` — when set, frames are routed
+    /// here instead of through PipeWire's buffer pool. Required for the
+    /// embedded portal-generic deployment in lamco-rdp-server (PipeWire's
+    /// buffer pointers can't be shared across separate connections).
+    pub frame_tx: Option<std::sync::mpsc::Sender<super::screencopy::RawFrame>>,
     /// Reference to the wl_shm global for buffer allocation.
     pub shm: Option<WlShm>,
     /// Handshake timeout for constraint events (0 = no timeout).
     pub handshake_timeout: Duration,
     /// Total frames delivered (for periodic logging and health).
     pub frame_count: u64,
+    /// Subset of `frame_count` for which a frame was successfully sent on
+    /// the direct frame channel. Symmetric with
+    /// `ScreencopyState::frames_sent_to_channel`.
+    pub frames_sent_to_channel: u64,
     /// Health event sender for capture metrics.
     pub health_tx: Option<crate::health::HealthSender>,
 }
@@ -204,6 +214,11 @@ impl ExtCaptureState {
 
         // Create an image capture source from the output.
         // User data is the node_id for routing events.
+        tracing::trace!(
+            node_id,
+            output = output_global_name,
+            "ext capture: → source_manager.create_source(output)"
+        );
         let source = source_manager.create_source(&output, qh, node_id);
 
         // Create a capture session from the source.
@@ -212,6 +227,12 @@ impl ExtCaptureState {
         } else {
             ext_image_copy_capture_manager_v1::Options::empty()
         };
+        tracing::trace!(
+            node_id,
+            paint_cursors,
+            ?options,
+            "ext capture: → manager.create_session(source, options) — now awaiting buffer_size + shm_format + done events from compositor"
+        );
         let session = manager.create_session(&source, options, qh, node_id);
 
         let capture = ActiveExtCapture {
@@ -483,8 +504,27 @@ impl ExtCaptureState {
                 tracing::info!(node_id, width, height, "ext screenshot capture complete");
             }
         } else {
-            // Continuous capture: send to PipeWire and request next frame
-            if let Some(pw) = &self.pipewire {
+            // Continuous capture: deliver the frame, then request the next.
+            // Prefer the direct channel (in-process consumer like lamco-rdp-server
+            // which bypasses PipeWire because the buffer data pointers can't be
+            // shared across separate Wayland/PipeWire connections). Fall back to
+            // PipeWire's buffer pool when no direct channel is wired — mirrors
+            // ScreencopyState's delivery branch.
+            if let Some(tx) = &self.frame_tx {
+                let frame = super::screencopy::RawFrame {
+                    data,
+                    width,
+                    height,
+                    stride,
+                    format_raw,
+                };
+                if tx.send(frame).is_err() {
+                    tracing::warn!(node_id, "ext capture: direct frame channel closed");
+                } else {
+                    self.frames_sent_to_channel += 1;
+                    tracing::trace!(node_id, width, height, "Sent ext frame via direct channel");
+                }
+            } else if let Some(pw) = &self.pipewire {
                 pw.queue_buffer(node_id, data, width, height, stride, format_raw);
                 tracing::trace!(node_id, width, height, "Queued ext frame to PipeWire");
             }

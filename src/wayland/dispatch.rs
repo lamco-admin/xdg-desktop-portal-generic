@@ -659,7 +659,13 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, u32> for WaylandState {
             ext_image_copy_capture_session_v1::Event::Stopped => {
                 state.ext_capture.on_session_stopped(node_id);
             }
-            _ => {}
+            ref other => {
+                tracing::warn!(
+                    node_id,
+                    event = ?other,
+                    "ext capture session: unhandled event variant — possibly a newer protocol revision the bindings don't yet recognize"
+                );
+            }
         }
     }
 }
@@ -698,7 +704,13 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, u32> for WaylandState {
                 };
                 state.ext_capture.on_frame_failed(node_id, reason_val, qh);
             }
-            _ => {}
+            ref other => {
+                tracing::warn!(
+                    node_id,
+                    event = ?other,
+                    "ext capture frame: unhandled event variant — possibly a newer protocol revision"
+                );
+            }
         }
     }
 }

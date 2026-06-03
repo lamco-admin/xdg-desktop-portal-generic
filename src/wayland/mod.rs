@@ -846,8 +846,11 @@ impl WaylandConnection {
         self.state.screencopy.pipewire = Some(Arc::clone(&pipewire));
         self.state.ext_capture.pipewire = Some(pipewire);
 
-        // Wire direct frame channel if provided
-        self.state.screencopy.frame_tx = frame_tx;
+        // Wire direct frame channel if provided. Both screencopy and
+        // ext_capture take a sender so the active path delivers in-process
+        // regardless of which protocol the compositor selected for us.
+        self.state.screencopy.frame_tx.clone_from(&frame_tx);
+        self.state.ext_capture.frame_tx = frame_tx;
 
         // Wire health sender if set
         if let Some(ref health_tx) = self.health_tx {
