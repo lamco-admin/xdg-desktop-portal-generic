@@ -268,10 +268,21 @@ mod tests {
 
     #[test]
     fn test_env_override() {
-        // Test that from_env creates valid preferences
+        // With the capture override env vars unset, from_env() must return the
+        // documented defaults: no forced protocol and fallback enabled. Guard on
+        // each var so the test is not flaky when the runner has them set.
         let prefs = CapturePreference::from_env();
-        // Default should have no preferred, allow fallback
-        assert!(prefs.preferred.is_none() || prefs.preferred.is_some());
-        assert!(prefs.allow_fallback || !prefs.allow_fallback);
+        if std::env::var_os("XDP_GENERIC_CAPTURE_PROTOCOL").is_none() {
+            assert!(
+                prefs.preferred.is_none(),
+                "default preferred protocol should be None"
+            );
+        }
+        if std::env::var_os("XDP_GENERIC_CAPTURE_NO_FALLBACK").is_none() {
+            assert!(
+                prefs.allow_fallback,
+                "fallback should be enabled by default"
+            );
+        }
     }
 }

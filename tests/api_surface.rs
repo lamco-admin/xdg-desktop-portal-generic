@@ -3,6 +3,10 @@
 //! These tests verify that the public types, traits, and factory functions
 //! are accessible and behave correctly without requiring runtime services
 //! (no Wayland compositor, PipeWire, or D-Bus).
+#![expect(
+    clippy::unwrap_used,
+    reason = "integration tests run as a separate crate where the library's cfg(test) unwrap allowance does not apply; unwrap is acceptable in test setup"
+)]
 
 use xdg_desktop_portal_generic::{
     error::PortalError,

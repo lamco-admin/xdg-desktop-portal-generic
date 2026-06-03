@@ -251,3 +251,98 @@ pub type HealthReceiver = tokio::sync::mpsc::Receiver<PortalHealthEvent>;
 pub fn health_channel() -> (HealthSender, HealthReceiver) {
     tokio::sync::mpsc::channel(256)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_metrics_start_empty() {
+        let m = CaptureMetrics::new(CaptureProtocolType::WlrScreencopy);
+        assert_eq!(m.frames_captured, 0);
+        assert_eq!(m.frames_failed, 0);
+        assert_eq!(m.last_capture_latency, Duration::ZERO);
+        assert_eq!(m.avg_capture_latency, Duration::ZERO);
+        assert_eq!(m.protocol, CaptureProtocolType::WlrScreencopy);
+    }
+
+    #[test]
+    fn first_frame_seeds_the_moving_average() {
+        let mut m = CaptureMetrics::new(CaptureProtocolType::ExtImageCopyCapture);
+        m.record_frame(Duration::from_millis(100));
+        assert_eq!(m.frames_captured, 1);
+        assert_eq!(m.last_capture_latency, Duration::from_millis(100));
+        // The first sample seeds the average directly rather than blending.
+        assert_eq!(m.avg_capture_latency, Duration::from_millis(100));
+    }
+
+    #[test]
+    fn subsequent_frames_apply_alpha_0_1_ema() {
+        let mut m = CaptureMetrics::new(CaptureProtocolType::WlrScreencopy);
+        m.record_frame(Duration::from_millis(100)); // seeds avg = 100ms
+        m.record_frame(Duration::from_millis(200)); // 100*0.9 + 200*0.1 = 110ms
+        assert_eq!(m.frames_captured, 2);
+        assert_eq!(m.last_capture_latency, Duration::from_millis(200));
+        assert_eq!(m.avg_capture_latency, Duration::from_millis(110));
+    }
+
+    #[test]
+    fn failures_count_separately_from_captures() {
+        let mut m = CaptureMetrics::new(CaptureProtocolType::WlrScreencopy);
+        m.record_failure();
+        m.record_failure();
+        assert_eq!(m.frames_failed, 2);
+        assert_eq!(m.frames_captured, 0);
+    }
+
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "effective_fps returns an exact 0.0 by early-return when fewer than two frames are recorded"
+    )]
+    fn effective_fps_is_zero_below_two_frames() {
+        let mut m = CaptureMetrics::new(CaptureProtocolType::WlrScreencopy);
+        assert_eq!(m.effective_fps(), 0.0);
+        m.record_frame(Duration::from_millis(10));
+        assert_eq!(m.effective_fps(), 0.0);
+    }
+
+    #[tokio::test]
+    async fn health_channel_delivers_events_in_order() {
+        let (tx, mut rx) = health_channel();
+        tx.send(PortalHealthEvent::ClipboardSelectionChanged { format_count: 3 })
+            .await
+            .unwrap();
+        tx.send(PortalHealthEvent::ClipboardTransferResult {
+            success: true,
+            bytes: 42,
+        })
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(PortalHealthEvent::ClipboardSelectionChanged { format_count: 3 })
+        ));
+        assert!(matches!(
+            rx.recv().await,
+            Some(PortalHealthEvent::ClipboardTransferResult {
+                success: true,
+                bytes: 42
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn health_channel_buffers_without_a_draining_receiver() {
+        let (tx, _rx) = health_channel();
+        // The channel buffer is 256; a burst well under that must not block.
+        for i in 0..200u64 {
+            tx.try_send(PortalHealthEvent::EisFrameReceived {
+                last_serial: i as u32,
+                time_usec: i,
+            })
+            .expect("buffered send within capacity should succeed");
+        }
+    }
+}

@@ -63,7 +63,7 @@
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
-#![cfg_attr(test, allow(clippy::unwrap_used))]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod dbus;
 pub mod error;
