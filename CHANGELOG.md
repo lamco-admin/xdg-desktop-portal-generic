@@ -23,8 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Copyright holder is now **Lamco Development LLC** (`LICENSE-MIT`,
   `LICENSE-APACHE`).
+- **MSRV raised to 1.87** (required by `zbus` 5.14 / `zvariant` 5.10).
 - CI raised to the full gate: fmt, clippy `-D warnings` across all targets and
-  features, test, doc `-D warnings`, an MSRV 1.85 build, and `cargo-deny`.
+  features, test, doc `-D warnings`, an MSRV 1.87 build, and `cargo-deny`.
 - Dropped the deprecated `authors` field and the redundant top-level `LICENSE`
   file (the dual `LICENSE-MIT` + `LICENSE-APACHE` remain canonical).
 

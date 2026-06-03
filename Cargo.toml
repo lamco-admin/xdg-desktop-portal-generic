@@ -2,7 +2,7 @@
 name = "xdg-desktop-portal-generic"
 version = "0.4.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.87"
 license = "MIT OR Apache-2.0"
 description = "Generic XDG Desktop Portal backend for Wayland compositors, by Lamco Development LLC"
 repository = "https://github.com/lamco-admin/xdg-desktop-portal-generic"
@@ -15,7 +15,7 @@ readme = "README.md"
 exclude = [
     "/.github/",
     "/.githooks/",
-    "/.cargo/deny.toml",
+    "deny.toml",
     ".editorconfig",
     "Makefile",
     "clippy.toml",

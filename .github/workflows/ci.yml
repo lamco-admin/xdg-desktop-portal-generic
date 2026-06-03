@@ -7,7 +7,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  MSRV: "1.85"
+  MSRV: "1.87"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -88,4 +88,4 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
-      - run: cargo deny --config .cargo/deny.toml check
+      - run: cargo deny check
