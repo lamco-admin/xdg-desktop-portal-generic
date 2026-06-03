@@ -513,7 +513,7 @@ impl ScreencopyState {
             .and_then(|c| c.capture_started)
             .map(|start| start.elapsed());
 
-        if self.frame_count <= 3 || self.frame_count % 1000 == 0 {
+        if self.frame_count <= 3 || self.frame_count.is_multiple_of(1000) {
             tracing::debug!(
                 node_id,
                 frame_count = self.frame_count,

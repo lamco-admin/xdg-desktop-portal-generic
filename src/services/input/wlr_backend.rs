@@ -680,7 +680,7 @@ impl InputBackend for WlrInputBackend {
                 self.events_forwarded += 1;
 
                 // Emit periodic InputBatch health event
-                if self.events_forwarded % 100 == 0 {
+                if self.events_forwarded.is_multiple_of(100) {
                     if let Some(ref health_tx) = self.health_tx {
                         let _ = health_tx.try_send(crate::health::PortalHealthEvent::InputBatch {
                             events_forwarded: self.events_forwarded,
