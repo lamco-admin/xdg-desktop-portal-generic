@@ -204,7 +204,10 @@ impl SettingsInterface {
     }
 }
 
-#[interface(name = "org.freedesktop.impl.portal.Settings")]
+#[interface(
+    name = "org.freedesktop.impl.portal.Settings",
+    introspection_docs = false
+)]
 impl SettingsInterface {
     /// Read a single setting value.
     ///
@@ -273,7 +276,7 @@ impl SettingsInterface {
     // === Properties ===
 
     /// Interface version.
-    #[zbus(property)]
+    #[zbus(property, name = "version")]
     async fn version(&self) -> u32 {
         2
     }

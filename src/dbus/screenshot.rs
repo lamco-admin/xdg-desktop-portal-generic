@@ -47,7 +47,10 @@ impl ScreenshotInterface {
     }
 }
 
-#[interface(name = "org.freedesktop.impl.portal.Screenshot")]
+#[interface(
+    name = "org.freedesktop.impl.portal.Screenshot",
+    introspection_docs = false
+)]
 impl ScreenshotInterface {
     /// Capture a screenshot of the screen.
     ///
@@ -203,7 +206,7 @@ impl ScreenshotInterface {
     // === Properties ===
 
     /// Interface version.
-    #[zbus(property)]
+    #[zbus(property, name = "version")]
     #[expect(clippy::unused_async, reason = "zbus interface requires async")]
     async fn version(&self) -> u32 {
         2

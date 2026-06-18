@@ -171,7 +171,10 @@ impl ScreenCastInterface {
     }
 }
 
-#[interface(name = "org.freedesktop.impl.portal.ScreenCast")]
+#[interface(
+    name = "org.freedesktop.impl.portal.ScreenCast",
+    introspection_docs = false
+)]
 impl ScreenCastInterface {
     /// Create a new `ScreenCast` session.
     #[zbus(name = "CreateSession")]
@@ -498,7 +501,7 @@ impl ScreenCastInterface {
     }
 
     /// Interface version.
-    #[zbus(property)]
+    #[zbus(property, name = "version")]
     #[expect(clippy::unused_async, reason = "zbus interface requires async")]
     async fn version(&self) -> u32 {
         6

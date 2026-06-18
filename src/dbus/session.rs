@@ -58,7 +58,10 @@ impl SessionInterface {
     }
 }
 
-#[interface(name = "org.freedesktop.impl.portal.Session")]
+#[interface(
+    name = "org.freedesktop.impl.portal.Session",
+    introspection_docs = false
+)]
 impl SessionInterface {
     /// Close the session.
     ///
@@ -126,7 +129,7 @@ impl SessionInterface {
     // === Properties ===
 
     /// Interface version.
-    #[zbus(property)]
+    #[zbus(property, name = "version")]
     async fn version(&self) -> u32 {
         1
     }

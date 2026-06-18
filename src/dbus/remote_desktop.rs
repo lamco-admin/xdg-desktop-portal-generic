@@ -129,7 +129,10 @@ impl RemoteDesktopInterface {
     }
 }
 
-#[interface(name = "org.freedesktop.impl.portal.RemoteDesktop")]
+#[interface(
+    name = "org.freedesktop.impl.portal.RemoteDesktop",
+    introspection_docs = false
+)]
 impl RemoteDesktopInterface {
     /// Create a new `RemoteDesktop` session.
     ///
@@ -1055,7 +1058,7 @@ impl RemoteDesktopInterface {
         clippy::unused_async,
         reason = "zbus requires async for property methods"
     )]
-    #[zbus(property)]
+    #[zbus(property, name = "version")]
     async fn version(&self) -> u32 {
         2
     }

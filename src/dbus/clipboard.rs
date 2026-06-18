@@ -157,7 +157,10 @@ impl ClipboardInterface {
     }
 }
 
-#[interface(name = "org.freedesktop.impl.portal.Clipboard")]
+#[interface(
+    name = "org.freedesktop.impl.portal.Clipboard",
+    introspection_docs = false
+)]
 impl ClipboardInterface {
     /// Request clipboard access for a session.
     #[zbus(name = "RequestClipboard")]
@@ -420,7 +423,7 @@ impl ClipboardInterface {
     // === Properties ===
 
     /// Interface version.
-    #[zbus(property)]
+    #[zbus(property, name = "version")]
     #[expect(clippy::unused_async, reason = "zbus interface requires async")]
     async fn version(&self) -> u32 {
         1

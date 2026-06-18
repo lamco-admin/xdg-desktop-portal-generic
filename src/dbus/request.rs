@@ -62,7 +62,10 @@ impl RequestInterface {
     }
 }
 
-#[interface(name = "org.freedesktop.impl.portal.Request")]
+#[interface(
+    name = "org.freedesktop.impl.portal.Request",
+    introspection_docs = false
+)]
 impl RequestInterface {
     /// Close the request.
     ///
