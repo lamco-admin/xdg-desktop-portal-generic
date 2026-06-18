@@ -92,9 +92,15 @@ impl CaptureBackend for WlrCaptureBackend {
                 let pw = Arc::clone(&self.pipewire);
                 let rt = tokio::runtime::Handle::try_current();
                 match rt {
-                    Ok(handle) => handle.block_on(pw.create_stream(config)).map_err(|e| {
-                        PortalError::PipeWire(format!("Failed to create stream: {e}"))
-                    })?,
+                    // The capture trait method is sync but is invoked from the
+                    // zbus async handler; bridge to the async PipeWire call via
+                    // block_in_place so we do not start a runtime within a runtime.
+                    Ok(handle) => {
+                        tokio::task::block_in_place(|| handle.block_on(pw.create_stream(config)))
+                            .map_err(|e| {
+                                PortalError::PipeWire(format!("Failed to create stream: {e}"))
+                            })?
+                    }
                     Err(_) => {
                         return Err(PortalError::PipeWire(
                             "Cannot create PipeWire stream outside async context".to_string(),
@@ -159,7 +165,9 @@ impl CaptureBackend for WlrCaptureBackend {
                 let pw = Arc::clone(&self.pipewire);
                 let node_id = *id;
                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                    let _ = handle.block_on(pw.destroy_stream(node_id));
+                    tokio::task::block_in_place(|| {
+                        let _ = handle.block_on(pw.destroy_stream(node_id));
+                    });
                 }
 
                 tracing::info!(
