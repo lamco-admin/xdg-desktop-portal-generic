@@ -65,9 +65,17 @@ impl SourceType {
 
 /// Information about a PipeWire stream.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct StreamInfo {
     /// PipeWire node ID.
     pub node_id: u32,
+    /// PipeWire `object.serial` of the stream node, when available.
+    ///
+    /// Emitted as the ScreenCast v6 `pipewire-serial` stream property so
+    /// clients can re-follow the stream across output reconfiguration without
+    /// relying on the (deprecated) node ID. `None` when the compositor's
+    /// PipeWire is too old to assign a serial.
+    pub serial: Option<u64>,
     /// Source ID this stream captures.
     pub source_id: u32,
     /// Stream position (x, y).

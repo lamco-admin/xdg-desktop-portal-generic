@@ -88,7 +88,7 @@ impl CaptureBackend for WlrCaptureBackend {
                 framerate: 30,
             };
 
-            let node_id = {
+            let stream_ids = {
                 let pw = Arc::clone(&self.pipewire);
                 let rt = tokio::runtime::Handle::try_current();
                 match rt {
@@ -102,9 +102,11 @@ impl CaptureBackend for WlrCaptureBackend {
                     }
                 }
             };
+            let node_id = stream_ids.node_id;
 
             let stream = StreamInfo {
                 node_id,
+                serial: stream_ids.serial,
                 source_id: source.id,
                 position: (0, 0),
                 size: (source.width, source.height),

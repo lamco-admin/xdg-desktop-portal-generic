@@ -1,6 +1,6 @@
 //! `ScreenCast` D-Bus interface implementation.
 //!
-//! Implements `org.freedesktop.impl.portal.ScreenCast` version 5.
+//! Implements `org.freedesktop.impl.portal.ScreenCast` version 6.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -120,8 +120,10 @@ impl ScreenCastInterface {
 
     /// Build stream results for D-Bus response.
     ///
-    /// Includes `ScreenCast` v5 properties: `source_type` (from actual source),
-    /// `mapping_id` (persistent output identifier).
+    /// Includes `position`/`size`, `source_type`, the v5 `mapping_id`
+    /// (persistent output identifier), and — when the compositor's PipeWire
+    /// assigns one — the v6 `pipewire-serial` (`object.serial`) so clients can
+    /// re-follow the stream across output reconfiguration.
     #[expect(
         clippy::expect_used,
         reason = "infallible zvariant Value-to-OwnedValue conversions"
@@ -149,6 +151,11 @@ impl ScreenCastInterface {
                     if let Ok(val) = OwnedValue::try_from(Value::from(mapping_id.as_str())) {
                         props.insert("mapping_id".to_string(), val);
                     }
+                }
+                // ScreenCast v6: the PipeWire object.serial, emitted only when
+                // present (it is filtered to a non-zero value upstream).
+                if let Some(serial) = s.serial {
+                    props.insert("pipewire-serial".to_string(), OwnedValue::from(serial));
                 }
                 (s.node_id, props)
             })
@@ -494,7 +501,7 @@ impl ScreenCastInterface {
     #[zbus(property)]
     #[expect(clippy::unused_async, reason = "zbus interface requires async")]
     async fn version(&self) -> u32 {
-        5
+        6
     }
 }
 

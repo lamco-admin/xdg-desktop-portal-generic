@@ -37,6 +37,18 @@ use tokio::sync::oneshot;
 
 use crate::error::PortalError;
 
+/// Identifiers returned to the caller when a PipeWire stream is created.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct StreamIds {
+    /// PipeWire node ID (still required by ScreenCast consumers at v6).
+    pub node_id: u32,
+    /// PipeWire `object.serial` of the stream node, when available.
+    ///
+    /// Emitted as the ScreenCast v6 `pipewire-serial` stream property.
+    pub serial: Option<u64>,
+}
+
 /// Commands sent from async world to the PipeWire thread.
 #[non_exhaustive]
 pub enum PipeWireCommand {
@@ -44,8 +56,8 @@ pub enum PipeWireCommand {
     CreateStream {
         /// Configuration for the stream.
         config: StreamConfig,
-        /// Reply channel for the resulting PipeWire node ID.
-        reply: oneshot::Sender<Result<u32, PortalError>>,
+        /// Reply channel for the created stream's identifiers.
+        reply: oneshot::Sender<Result<StreamIds, PortalError>>,
     },
     /// Destroy a stream by its node ID.
     DestroyStream {
@@ -221,14 +233,35 @@ impl PipeWireManager {
                                         continue;
                                     }
                                 }
+                                // object.serial is normally present in the
+                                // stream's local property dict by the time the
+                                // node id is assigned, but on some PipeWire
+                                // builds it can land a few iterations later.
+                                // Best-effort poll (bounded, never fatal); a
+                                // missing serial simply degrades to v5 (no
+                                // pipewire-serial emitted), e.g. on libpipewire
+                                // older than 0.3.64.
+                                let mut serial = pw_stream.object_serial();
+                                if serial.is_none() {
+                                    for _ in 0..10 {
+                                        mainloop
+                                            .loop_()
+                                            .iterate(Timeout::Finite(Duration::from_millis(10)));
+                                        serial = pw_stream.object_serial();
+                                        if serial.is_some() {
+                                            break;
+                                        }
+                                    }
+                                }
                                 tracing::info!(
                                     node_id = node_id,
+                                    serial = ?serial,
                                     width = config.width,
                                     height = config.height,
                                     "PipeWire stream created"
                                 );
                                 streams.insert(node_id, pw_stream);
-                                let _ = reply.send(Ok(node_id));
+                                let _ = reply.send(Ok(StreamIds { node_id, serial }));
                             }
                             Err(e) => {
                                 tracing::error!("Failed to create PipeWire stream: {}", e);
@@ -338,8 +371,9 @@ impl PipeWireManager {
 
     /// Create a new video source stream.
     ///
-    /// Returns the PipeWire node ID for the created stream.
-    pub async fn create_stream(&self, config: StreamConfig) -> Result<u32, PortalError> {
+    /// Returns the created stream's identifiers (PipeWire node ID and, when
+    /// available, its `object.serial`).
+    pub async fn create_stream(&self, config: StreamConfig) -> Result<StreamIds, PortalError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(PipeWireCommand::CreateStream {

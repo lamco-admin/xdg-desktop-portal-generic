@@ -55,7 +55,7 @@
 //! # Supported Interfaces
 //!
 //! - `org.freedesktop.impl.portal.RemoteDesktop` (v2) - Input injection
-//! - `org.freedesktop.impl.portal.ScreenCast` (v5) - Screen capture via PipeWire
+//! - `org.freedesktop.impl.portal.ScreenCast` (v6) - Screen capture via PipeWire
 //! - `org.freedesktop.impl.portal.Clipboard` (v1) - Clipboard sync
 //! - `org.freedesktop.impl.portal.Settings` (v2) - Desktop appearance settings
 //! - `org.freedesktop.impl.portal.Screenshot` (v2) - Screen capture to file

@@ -220,6 +220,24 @@ impl PipeWireVideoStream {
         self.node_id
     }
 
+    /// Read this stream node's PipeWire `object.serial`.
+    ///
+    /// Available once the node has been assigned (i.e. after the node ID is
+    /// valid). Returns `None` when the property is absent, unparseable, or
+    /// zero. This is the value emitted as the ScreenCast v6 `pipewire-serial`
+    /// stream property, letting consumers re-follow the stream across output
+    /// reconfiguration without depending on the node ID.
+    pub fn object_serial(&self) -> Option<u64> {
+        // `PW_KEY_OBJECT_SERIAL` is a stable PipeWire property key; using the
+        // literal avoids gating the pipewire crate's `v0_3_41` feature solely
+        // for the typed `keys::OBJECT_SERIAL` constant.
+        self.stream
+            .properties()
+            .get("object.serial")
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|&serial| serial != 0)
+    }
+
     /// Queue a frame of pixel data into the stream.
     ///
     /// Dequeues a buffer from PipeWire, copies the frame data in, then
