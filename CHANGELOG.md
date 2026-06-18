@@ -5,6 +5,58 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-06-18
+
+### Breaking
+
+- `PipeWireManager::create_stream` now returns `StreamIds` (the PipeWire node
+  id plus the optional `object.serial`) instead of `u32`; callers read
+  `.node_id` (and the new `.serial`).
+- `StreamInfo` gained a `serial: Option<u64>` field and is now
+  `#[non_exhaustive]`.
+- `PipeWireCommand::CreateStream`'s reply channel now carries `StreamIds`.
+
+### Added
+
+- **ScreenCast v6**: the backend advertises `ScreenCast` interface version 6
+  and emits the `pipewire-serial` stream property (the PipeWire node's
+  `object.serial`, D-Bus type `t`) alongside the v5 `mapping_id`. Clients use
+  it to re-follow a stream across output reconfiguration without relying on
+  the deprecated node id. Emitted only when PipeWire supplies a non-zero
+  serial (`libpipewire` >= 0.3.64); older PipeWire degrades cleanly to v5.
+
+### Changed
+
+- **Dependencies modernized**: PipeWire / libspa 0.9 -> 0.10 (the loop
+  `iterate()` timeout argument is now a `Timeout` enum), reis 0.6 -> 0.7,
+  nix 0.30 -> 0.31, png 0.17 -> 0.18, plus a compatible refresh of the rest
+  of the tree (tokio 1.52, zbus 5.16, zvariant 5.12, wayland-client 0.31.14,
+  wayland-protocols 0.32.12, and others). MSRV remains 1.87.
+- **Publishing metadata**: `homepage` now points to the product page
+  (`https://lamco.ai/open-source/xdg-desktop-portal-generic/`) and
+  `documentation` to docs.rs; the README carries Website / Documentation /
+  Source links, per the website-link publishing standard. CI gained a
+  `cargo package` verification job.
+
+### Fixed
+
+- **Standalone D-Bus service path now works end-to-end** (it had only been
+  exercised via the embedded library API). Three latent defects were fixed,
+  verified against a live `xdg-desktop-portal` ScreenCast session on COSMIC:
+  - Introspection XML is valid again. Doc comments are no longer emitted into
+    introspection (`introspection_docs = false` on every interface); a `--`
+    inside a generated XML comment produced malformed introspection that broke
+    property reads for strict clients (sd-bus/`busctl`, expat).
+  - Each interface's `version` property is exposed under its spec name
+    `version` (lowercase) rather than the auto-PascalCased `Version`, so the
+    portal frontend's version negotiation can read it.
+  - `ScreenCast.Start` and `Session.Close` no longer panic ("cannot start a
+    runtime from within a runtime"); the synchronous capture create/destroy
+    calls bridge to the async PipeWire manager via `block_in_place`.
+- EIS bridge: a client device `Release` (surfaced by reis 0.7 as the new
+  `DeviceClosed` request) now completes teardown via `Device::remove()`,
+  emitting the protocol `destroyed` events that reis 0.6 dropped silently.
+
 ## [0.4.0] - 2026-06-02
 
 ### Added

@@ -1,5 +1,11 @@
 # xdg-desktop-portal-generic
 
+[![Crates.io](https://img.shields.io/crates/v/xdg-desktop-portal-generic.svg)](https://crates.io/crates/xdg-desktop-portal-generic)
+[![Documentation](https://docs.rs/xdg-desktop-portal-generic/badge.svg)](https://docs.rs/xdg-desktop-portal-generic)
+[![License](https://img.shields.io/crates/l/xdg-desktop-portal-generic.svg)](https://github.com/lamco-admin/xdg-desktop-portal-generic)
+
+**[Website](https://lamco.ai/open-source/xdg-desktop-portal-generic/)** · **[Documentation](https://docs.rs/xdg-desktop-portal-generic)** · **[Source](https://github.com/lamco-admin/xdg-desktop-portal-generic)**
+
 A generic [XDG Desktop Portal](https://github.com/flatpak/xdg-desktop-portal)
 backend for Wayland compositors.
 
@@ -10,15 +16,16 @@ compositor that implements standard ext- or wlr- protocols.
 Connects as a **standalone Wayland client** -- no compositor-side code changes
 or custom traits required.
 
-Developed by [Lamco Development](https://lamco.ai) as part of the
-[lamco-rdp-server](https://github.com/lamco-admin/lamco-rdp-server) ecosystem.
+Developed by [Lamco Development LLC](https://lamco.ai/open-source/xdg-desktop-portal-generic/)
+as part of the [lamco-rdp-server](https://lamco.ai/products/lamco-rdp-server/)
+ecosystem.
 
 ## Supported Portals
 
 | Portal Interface | Version | Primary Protocol | Fallback |
 |------------------|---------|------------------|----------|
 | `RemoteDesktop` | v2 | EIS (libei) bridge mode | wlr-virtual-pointer + zwp-virtual-keyboard |
-| `ScreenCast` | v5 | ext-image-copy-capture-v1 | wlr-screencopy-v1 |
+| `ScreenCast` | v6 | ext-image-copy-capture-v1 | wlr-screencopy-v1 |
 | `Clipboard` | v1 | ext-data-control-v1 | wlr-data-control-v1 |
 | `Settings` | v2 | Environment variable config | GTK_THEME detection |
 | `Screenshot` | v2 | Single-frame capture to PNG | -- |
@@ -30,7 +37,7 @@ automatically with ext- protocols preferred over wlr- equivalents.
 
 Build dependencies:
 
-- Rust >= 1.77
+- Rust >= 1.87
 - `libpipewire-0.3-dev`
 - `libspa-0.2-dev`
 - `libwayland-dev`

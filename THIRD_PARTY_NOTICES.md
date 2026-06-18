@@ -6,7 +6,7 @@ lockfile; refresh with `cargo about generate about.hbs --all-features`.)
 
 ## Overview
 
-- MIT License: 159 crate(s)
+- MIT License: 140 crate(s)
 - Unicode License v3: 1 crate(s)
 
 ---
@@ -14,7 +14,7 @@ lockfile; refresh with `cargo about generate about.hbs --all-features`.)
 ## MIT License
 
 Used by:
-- uds_windows 1.1.0
+- uds_windows 1.2.1
 
 ```
     MIT License
@@ -114,7 +114,7 @@ SOFTWARE.
 
 Used by:
 - cfg-if 1.0.4
-- socket2 0.6.2
+- socket2 0.6.4
 
 ```
 Copyright (c) 2014 Alex Crichton
@@ -150,7 +150,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- mio 1.1.1
+- mio 1.2.1
 
 ```
 Copyright (c) 2014 Carl Lerche and other MIO contributors
@@ -216,11 +216,10 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- bitflags 1.3.2
-- bitflags 2.11.0
-- log 0.4.29
+- bitflags 2.13.0
+- log 0.4.32
 - regex-automata 0.4.14
-- regex-syntax 0.8.9
+- regex-syntax 0.8.11
 
 ```
 Copyright (c) 2014 The Rust Project Developers
@@ -256,7 +255,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- uuid 1.21.0
+- uuid 1.23.3
 
 ```
 Copyright (c) 2014 The Rust Project Developers
@@ -360,13 +359,13 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- wayland-backend 0.3.12
-- wayland-client 0.31.12
-- wayland-protocols-misc 0.3.10
-- wayland-protocols-wlr 0.3.10
-- wayland-protocols 0.32.10
-- wayland-scanner 0.31.8
-- wayland-sys 0.31.8
+- wayland-backend 0.3.15
+- wayland-client 0.31.14
+- wayland-protocols-misc 0.3.12
+- wayland-protocols-wlr 0.3.12
+- wayland-protocols 0.32.12
+- wayland-scanner 0.31.10
+- wayland-sys 0.31.11
 
 ```
 Copyright (c) 2015 Elinor Berger
@@ -396,7 +395,7 @@ THE SOFTWARE.
 ## MIT License
 
 Used by:
-- tempfile 3.26.0
+- tempfile 3.27.0
 
 ```
 Copyright (c) 2015 Steven Allen
@@ -432,43 +431,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- unicode-segmentation 1.12.0
-
-```
-Copyright (c) 2015 The Rust Project Developers
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-```
-
----
-
-## MIT License
-
-Used by:
-- png 0.17.16
+- png 0.18.1
 
 ```
 Copyright (c) 2015 nwin
@@ -496,36 +459,6 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
-
-```
-
----
-
-## MIT License
-
-Used by:
-- winapi 0.3.9
-
-```
-Copyright (c) 2015-2018 The winapi-rs Developers
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
 
 ```
 
@@ -579,7 +512,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- hashbrown 0.16.1
+- hashbrown 0.17.1
 
 ```
 Copyright (c) 2016 Amanieu d'Antras
@@ -690,7 +623,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- indexmap 2.13.0
+- indexmap 2.14.0
 
 ```
 Copyright (c) 2016--2017
@@ -968,7 +901,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- bytes 1.11.1
+- bytes 1.12.0
 
 ```
 Copyright (c) 2018 Carl Lerche
@@ -1004,7 +937,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- smallvec 1.15.1
+- smallvec 1.15.2
 
 ```
 Copyright (c) 2018 The Servo Project Developers
@@ -1040,7 +973,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- getrandom 0.4.1
+- getrandom 0.4.3
 
 ```
 Copyright (c) 2018-2026 The rust-random Project Developers
@@ -1176,7 +1109,7 @@ Used by:
 - tracing-attributes 0.1.31
 - tracing-core 0.1.36
 - tracing-log 0.2.0
-- tracing-subscriber 0.3.22
+- tracing-subscriber 0.3.23
 - tracing 0.1.44
 
 ```
@@ -1316,11 +1249,11 @@ SOFTWARE.
 ## MIT License
 
 Used by:
-- zbus 5.14.0
-- zbus_macros 5.14.0
-- zbus_names 4.3.1
-- zvariant 5.10.0
-- zvariant_derive 5.10.0
+- zbus 5.16.0
+- zbus_macros 5.16.0
+- zbus_names 4.3.2
+- zvariant 5.12.0
+- zvariant_derive 5.12.0
 
 ```
 Copyright (c) 2024 Zeeshan Ali Khan & zbus contributors
@@ -1356,9 +1289,9 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- toml_datetime 0.7.5+spec-1.1.0
-- toml_edit 0.23.10+spec-1.0.0
-- toml_parser 1.0.9+spec-1.1.0
+- toml_datetime 1.1.1+spec-1.1.0
+- toml_edit 0.25.12+spec-1.1.0
+- toml_parser 1.1.2+spec-1.1.0
 
 ```
 Copyright (c) Individual contributors
@@ -1388,7 +1321,7 @@ SOFTWARE.
 ## MIT License
 
 Used by:
-- libc 0.2.182
+- libc 0.2.186
 
 ```
 Copyright (c) The Rust Project Developers
@@ -1424,10 +1357,10 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- libspa-sys 0.9.2
-- libspa 0.9.2
-- pipewire-sys 0.9.2
-- pipewire 0.9.2
+- libspa-sys 0.10.0
+- libspa 0.10.0
+- pipewire-sys 0.10.0
+- pipewire 0.10.0
 
 ```
 Copyright The pipewire-rs Contributors.
@@ -1555,7 +1488,7 @@ SOFTWARE.
 ## MIT License
 
 Used by:
-- tokio-macros 2.6.0
+- tokio-macros 2.7.0
 
 ```
 MIT License
@@ -1652,38 +1585,7 @@ SOFTWARE.
 ## MIT License
 
 Used by:
-- convert_case 0.8.0
-
-```
-MIT License
-
-Copyright (c) 2025 rutrum
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
-
----
-
-## MIT License
-
-Used by:
-- xdg-desktop-portal-generic 0.3.0
+- xdg-desktop-portal-generic 0.5.0
 
 ```
 MIT License
@@ -1716,23 +1618,9 @@ SOFTWARE.
 
 Used by:
 - cookie-factory 0.3.3
-- r-efi 5.3.0
-- wasip2 1.0.2+wasi-0.2.9
-- wasip3 0.4.0+wasi-0.3.0-rc-2026-01-06
-- winapi-i686-pc-windows-gnu 0.4.0
-- winapi-x86_64-pc-windows-gnu 0.4.0
+- r-efi 6.0.0
 - windows-link 0.2.1
-- windows-sys 0.60.2
 - windows-sys 0.61.2
-- windows-targets 0.53.5
-- windows_aarch64_gnullvm 0.53.1
-- windows_aarch64_msvc 0.53.1
-- windows_i686_gnu 0.53.1
-- windows_i686_gnullvm 0.53.1
-- windows_i686_msvc 0.53.1
-- windows_x86_64_gnu 0.53.1
-- windows_x86_64_gnullvm 0.53.1
-- windows_x86_64_msvc 0.53.1
 
 ```
 MIT License
@@ -1761,7 +1649,7 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- tokio 1.49.0
+- tokio 1.52.3
 
 ```
 MIT License
@@ -1793,7 +1681,7 @@ SOFTWARE.
 ## MIT License
 
 Used by:
-- simd-adler32 0.3.8
+- simd-adler32 0.3.9
 
 ```
 MIT License
@@ -1937,7 +1825,7 @@ Used by:
 - async-io 2.6.0
 - async-lock 3.4.2
 - async-process 2.5.0
-- async-signal 0.2.13
+- async-signal 0.2.14
 - async-task 4.7.1
 - async-trait 0.1.89
 - atomic-waker 1.1.2
@@ -1947,32 +1835,31 @@ Used by:
 - evdev 0.13.2
 - event-listener-strategy 0.5.4
 - event-listener 5.4.1
-- fastrand 2.3.0
+- fastrand 2.4.1
 - futures-lite 2.6.1
 - hermit-abi 0.5.2
 - linux-raw-sys 0.12.1
-- once_cell 1.21.3
+- once_cell 1.21.4
 - ordered-stream 0.2.0
 - parking 2.2.1
-- pin-project-lite 0.2.16
-- piper 0.2.4
+- pin-project-lite 0.2.17
+- piper 0.2.5
 - polling 3.11.0
-- proc-macro-crate 3.4.0
+- proc-macro-crate 3.5.0
 - proc-macro2 1.0.106
-- quote 1.0.44
-- reis 0.6.1
+- quote 1.0.45
+- reis 0.7.0
 - rustix 1.1.4
 - serde 1.0.228
 - serde_core 1.0.228
 - serde_derive 1.0.228
 - serde_repr 0.1.20
-- syn 2.0.117
+- syn 2.0.118
 - thiserror-impl 2.0.18
 - thiserror 2.0.18
 - unicode-ident 1.0.24
 - wasi 0.11.1+wasi-snapshot-preview1
-- wit-bindgen 0.51.0
-- zvariant_utils 3.3.0
+- zvariant_utils 3.4.0
 
 ```
 Permission is hereby granted, free of charge, to any
@@ -2006,7 +1893,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- winnow 0.7.14
+- winnow 1.0.3
 
 ```
 Permission is hereby granted, free of charge, to any person obtaining
@@ -2035,7 +1922,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- memchr 2.8.0
+- memchr 2.8.2
 
 ```
 The MIT License (MIT)
@@ -2068,7 +1955,7 @@ THE SOFTWARE.
 
 Used by:
 - nix 0.29.0
-- nix 0.30.1
+- nix 0.31.3
 
 ```
 The MIT License (MIT)
@@ -2203,7 +2090,7 @@ SOFTWARE.
 ## MIT License
 
 Used by:
-- quick-xml 0.38.4
+- quick-xml 0.39.4
 
 ```
 The MIT License (MIT)
