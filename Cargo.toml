@@ -40,7 +40,7 @@ zvariant = "5.2"
 tokio = { version = "1.35", features = ["full"] }
 
 # EIS protocol (input injection)
-reis = "0.6.1"
+reis = "0.7"
 enumflags2 = "0.7"
 
 # Wayland client (for wlr virtual input backend)
@@ -50,8 +50,8 @@ wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
 
 # PipeWire (screen capture)
-pipewire = "0.9"
-libspa = "0.9"
+pipewire = "0.10"
+libspa = "0.10"
 
 # Error handling
 anyhow = "1.0"
@@ -69,10 +69,10 @@ uuid = { version = "1.11", features = ["v4"] }
 xkbcommon = { version = "0.9", features = ["wayland"] }
 
 # Image encoding (for Screenshot portal)
-png = "0.17"
+png = "0.18"
 
 # System
-nix = { version = "0.30", features = ["socket", "poll", "fs", "mman", "time"] }
+nix = { version = "0.31", features = ["socket", "poll", "fs", "mman", "time"] }
 libc = "0.2"
 
 # Optional: kernel-level input injection via /dev/uinput

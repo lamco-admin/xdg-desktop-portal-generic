@@ -31,6 +31,7 @@ use std::{
     time::Duration,
 };
 
+use pipewire::loop_::Timeout;
 pub use stream::StreamConfig;
 use tokio::sync::oneshot;
 
@@ -157,7 +158,7 @@ impl PipeWireManager {
     /// Run the PipeWire event loop on the dedicated thread.
     ///
     /// Uses a manual iterate loop with `std::sync::mpsc` for commands.
-    /// pipewire-rs 0.9 uses lifetime-bound Box types that prevent Clone/move
+    /// pipewire-rs 0.10 uses lifetime-bound Box types that prevent Clone/move
     /// into closures, so we poll for commands on each loop iteration.
     #[expect(
         clippy::too_many_lines,
@@ -196,7 +197,9 @@ impl PipeWireManager {
                                 let mut node_id = pw_stream.node_id();
                                 if node_id == u32::MAX {
                                     for attempt in 0..50 {
-                                        mainloop.loop_().iterate(Duration::from_millis(10));
+                                        mainloop
+                                            .loop_()
+                                            .iterate(Timeout::Finite(Duration::from_millis(10)));
                                         node_id = pw_stream.refresh_node_id();
                                         if node_id != u32::MAX {
                                             tracing::debug!(
@@ -288,7 +291,9 @@ impl PipeWireManager {
             }
 
             // Run one PipeWire main loop iteration (process stream events)
-            mainloop.loop_().iterate(Duration::from_millis(10));
+            mainloop
+                .loop_()
+                .iterate(Timeout::Finite(Duration::from_millis(10)));
         }
 
         // Clean up all streams before dropping core/context

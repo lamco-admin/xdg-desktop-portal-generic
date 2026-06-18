@@ -172,15 +172,24 @@ impl EisBridgeBackend {
                 time_usec: t.time,
             })),
 
-            // Protocol-level events don't produce InputEvent.
-            // Frame, DeviceStart/StopEmulating carry health data harvested in process_events().
+            // Protocol-level events don't produce an InputEvent.
+            // Frame and DeviceStart/StopEmulating carry health data harvested in
+            // process_events(); DeviceClosed teardown is also handled there.
+            // RequestDevice/Ready are sender-context or lifecycle-only. TextKeysym/TextUtf8
+            // (the libei 1.6 `ei_text` capability) are not forwarded yet — text injection is
+            // a separate, unimplemented capability that the bridge does not advertise.
             EisRequest::Disconnect
             | EisRequest::Bind(_)
             | EisRequest::Frame(_)
             | EisRequest::DeviceStartEmulating(_)
             | EisRequest::DeviceStopEmulating(_)
             | EisRequest::ScrollCancel(_)
-            | EisRequest::TouchCancel(_) => None,
+            | EisRequest::TouchCancel(_)
+            | EisRequest::DeviceClosed(_)
+            | EisRequest::RequestDevice(_)
+            | EisRequest::Ready(_)
+            | EisRequest::TextKeysym(_)
+            | EisRequest::TextUtf8(_) => None,
         }
     }
 }
@@ -304,6 +313,16 @@ impl InputBackend for EisBridgeBackend {
                                         },
                                     );
                                 }
+                            }
+                            // reis 0.7: a client `Release` now surfaces as DeviceClosed. The
+                            // server must call Device::remove() to finish teardown and emit the
+                            // protocol `destroyed` events (in 0.6.1 this was a silent no-op).
+                            EisRequest::DeviceClosed(closed) => {
+                                tracing::debug!(
+                                    session_id = %session_id,
+                                    "EIS client released a device; completing teardown"
+                                );
+                                closed.device.remove();
                             }
                             _ => {}
                         }
