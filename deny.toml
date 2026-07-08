@@ -1,6 +1,16 @@
 [advisories]
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
+ignore = [
+    # quick-xml is a BUILD-TIME dependency of wayland-scanner (a proc-macro): it
+    # parses the first-party Wayland protocol XML shipped in wayland-protocols at
+    # build time, never runtime or attacker-controlled input, and is absent from
+    # the runtime binary. Both advisories are XML-input DoS, so runtime exposure
+    # is nil. A lock fix is blocked by wayland-scanner pinning quick-xml below
+    # 0.41 (which carries the fix); revisit when wayland-rs bumps it upstream.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]
 
 [licenses]
 allow = [
