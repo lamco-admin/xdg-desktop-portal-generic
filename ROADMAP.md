@@ -30,6 +30,20 @@ full-frame damage — and, longer term, **per-window capture** via
 expose them. The underlying protocols are frozen and stable, so this is
 implementation work, not a protocol-version dependency.
 
+## HDR / 10-bit capture
+
+The current capture output is 8-bit SDR (a hardcoded `BGRx` SPA format carrying no
+color metadata). A planned direction is HDR-aware capture: on the `ext-` path,
+negotiate 10-bit (`xRGB2101010`) or FP16 (`RGBA_F16`) formats where the compositor
+offers them; read the source output's color state via `wp-color-management`; and
+publish the true colorimetry — primaries, transfer function, matrix, range — on
+the PipeWire stream's SPA video format instead of dropping it. That makes the
+encoding self-describing so consumers can handle HDR downstream. It builds on the
+pixel-format propagation fix (carry the real captured format rather than assuming
+`BGRx`), which is the prerequisite; the `wlr-screencopy` path stays 8-bit. Full
+requirements (with fallback/no-regression bars) are tracked in the lamco-admin
+planning notes for this project (`10-BIT-HDR-CAPTURE-REQUIREMENTS-2026-07-07.md`).
+
 ## Dependency modernization
 
 A non-breaking refresh of compatible dependencies rides each release. The
