@@ -6,7 +6,7 @@ use zbus::zvariant::ObjectPath;
 
 use crate::{
     error::{PortalError, Result},
-    types::{DeviceTypes, SourceInfo, StreamInfo},
+    types::{DeviceTypes, PointerBarrier, SourceInfo, StreamInfo},
 };
 
 /// Restore data for persistent sessions.
@@ -119,6 +119,24 @@ pub struct Session {
     /// Whether clipboard has been requested.
     pub clipboard_requested: bool,
 
+    // InputCapture
+    /// Whether this session was created via `InputCapture.CreateSession`/
+    /// `CreateSession2`, as opposed to RemoteDesktop or ScreenCast. Scopes
+    /// `GetZones`/`SetPointerBarriers`/`Enable`/`Disable`/`Release`/
+    /// `ConnectToEIS` and filters which sessions receive `ZonesChanged`.
+    pub is_input_capture_session: bool,
+    /// Toggled by `Enable()`/`Disable()`. Independent of `state` — a
+    /// `Started` session can be enabled/disabled repeatedly without
+    /// restarting.
+    pub input_capture_enabled: bool,
+    /// Whether a barrier has actually fired. Always `false` until real
+    /// barrier enforcement is implemented; kept now so `Disable()`'s
+    /// "emit `Deactivated` before `Disabled` if active" ordering is
+    /// already correct once enforcement lands.
+    pub input_capture_active: bool,
+    /// Barriers from the most recent successful `SetPointerBarriers` call.
+    pub input_capture_barriers: Vec<PointerBarrier>,
+
     // Persistence
     /// Persistence mode for this session.
     pub persist_mode: PersistMode,
@@ -156,6 +174,11 @@ impl Session {
 
             clipboard_enabled: false,
             clipboard_requested: false,
+
+            is_input_capture_session: false,
+            input_capture_enabled: false,
+            input_capture_active: false,
+            input_capture_barriers: Vec::new(),
 
             persist_mode: PersistMode::None,
             restore_token: None,
@@ -329,6 +352,41 @@ impl Session {
         Ok(())
     }
 
+    /// Enable or disable InputCapture for this session.
+    ///
+    /// Requires the session to be `Started`. Disabling while a barrier is
+    /// active clears `input_capture_active` (the caller is responsible for
+    /// emitting `Deactivated` before `Disabled` — this method only updates
+    /// state).
+    pub fn set_input_capture_enabled(&mut self, enabled: bool) -> Result<()> {
+        if self.state != SessionState::Started {
+            return Err(PortalError::InvalidState {
+                expected: "Started".to_string(),
+                actual: self.state.to_string(),
+            });
+        }
+        self.input_capture_enabled = enabled;
+        if !enabled {
+            self.input_capture_active = false;
+        }
+        tracing::debug!(
+            session_id = %self.id,
+            enabled = enabled,
+            "InputCapture enabled state changed"
+        );
+        Ok(())
+    }
+
+    /// Replace this session's pointer barriers with a newly-accepted set.
+    pub fn set_pointer_barriers(&mut self, barriers: Vec<PointerBarrier>) {
+        tracing::debug!(
+            session_id = %self.id,
+            barrier_count = barriers.len(),
+            "Pointer barriers updated"
+        );
+        self.input_capture_barriers = barriers;
+    }
+
     /// Close the session.
     pub fn close(&mut self) {
         if self.state != SessionState::Closed {
@@ -478,6 +536,64 @@ mod tests {
         // Can't request after close
         session2.close();
         assert!(!session2.can_request_clipboard());
+    }
+
+    #[test]
+    fn test_input_capture_session_marker() {
+        let mut session = test_session();
+        assert!(!session.is_input_capture_session);
+        session.is_input_capture_session = true;
+        assert!(session.is_input_capture_session);
+    }
+
+    #[test]
+    fn test_input_capture_enable_requires_started() {
+        let mut session = test_session();
+
+        // Can't enable before Start
+        assert!(session.set_input_capture_enabled(true).is_err());
+        assert!(!session.input_capture_enabled);
+
+        session.select_devices(DeviceTypes::all()).unwrap();
+        session.start(vec![]).unwrap();
+
+        assert!(session.set_input_capture_enabled(true).is_ok());
+        assert!(session.input_capture_enabled);
+    }
+
+    #[test]
+    fn test_input_capture_disable_clears_active() {
+        let mut session = test_session();
+        session.select_devices(DeviceTypes::all()).unwrap();
+        session.start(vec![]).unwrap();
+
+        session.set_input_capture_enabled(true).unwrap();
+        session.input_capture_active = true;
+
+        session.set_input_capture_enabled(false).unwrap();
+        assert!(!session.input_capture_enabled);
+        assert!(!session.input_capture_active);
+    }
+
+    #[test]
+    fn test_pointer_barriers_replace() {
+        let mut session = test_session();
+        assert!(session.input_capture_barriers.is_empty());
+
+        let barrier = crate::types::PointerBarrier {
+            barrier_id: 1,
+            x1: 0,
+            y1: 0,
+            x2: 1920,
+            y2: 0,
+        };
+        session.set_pointer_barriers(vec![barrier]);
+        assert_eq!(session.input_capture_barriers.len(), 1);
+        assert_eq!(session.input_capture_barriers[0].barrier_id, 1);
+
+        // Replacing with an empty set clears it
+        session.set_pointer_barriers(vec![]);
+        assert!(session.input_capture_barriers.is_empty());
     }
 
     #[test]

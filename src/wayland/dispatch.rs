@@ -55,7 +55,7 @@ use wayland_protocols_wlr::{
 use super::{
     data_control::DataControlState, ext_capture::ExtCaptureState, screencopy::ScreencopyState,
 };
-use crate::types::SourceInfo;
+use crate::types::{InputCaptureZone, SourceInfo};
 
 /// Output information collected from wl_output events.
 #[derive(Debug, Clone, Default)]
@@ -145,6 +145,30 @@ impl WaylandState {
                 let info = info.lock().ok()?;
                 if info.done && info.width > 0 && info.height > 0 {
                     Some(info.to_source_info())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Get all completed output infos as InputCapture zones.
+    ///
+    /// Sibling to [`Self::get_sources`], same completion filter, different
+    /// output shape (raw geometry rather than `SourceInfo`) for
+    /// `InputCapture.GetZones`.
+    pub fn get_input_capture_zones(&self) -> Vec<InputCaptureZone> {
+        self.outputs
+            .iter()
+            .filter_map(|(_, info)| {
+                let info = info.lock().ok()?;
+                if info.done && info.width > 0 && info.height > 0 {
+                    Some(InputCaptureZone {
+                        width: info.width,
+                        height: info.height,
+                        x: info.x,
+                        y: info.y,
+                    })
                 } else {
                     None
                 }
@@ -844,5 +868,35 @@ mod tests {
         let state = WaylandState::default();
         // No outputs, no sources
         assert!(state.get_sources().is_empty());
+    }
+
+    #[test]
+    fn test_get_input_capture_zones_filters_incomplete() {
+        let state = WaylandState::default();
+        // No outputs, no zones
+        assert!(state.get_input_capture_zones().is_empty());
+    }
+
+    #[test]
+    fn test_output_info_zone_geometry() {
+        let info = OutputInfo {
+            global_name: 1,
+            width: 2560,
+            height: 1440,
+            x: 1920,
+            y: 0,
+            done: true,
+            ..Default::default()
+        };
+        let zone = crate::types::InputCaptureZone {
+            width: info.width,
+            height: info.height,
+            x: info.x,
+            y: info.y,
+        };
+        assert_eq!(zone.width, 2560);
+        assert_eq!(zone.height, 1440);
+        assert_eq!(zone.x, 1920);
+        assert_eq!(zone.y, 0);
     }
 }

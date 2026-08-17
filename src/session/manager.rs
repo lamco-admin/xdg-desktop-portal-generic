@@ -333,6 +333,17 @@ impl SessionManager {
             .collect()
     }
 
+    /// Get session handles for all non-closed InputCapture sessions.
+    ///
+    /// Used to fan out `ZonesChanged` when monitor geometry changes.
+    pub fn input_capture_session_handles(&self) -> Vec<ObjectPath<'static>> {
+        self.sessions
+            .values()
+            .filter(|s| s.is_input_capture_session && s.state != super::state::SessionState::Closed)
+            .map(|s| s.id.clone())
+            .collect()
+    }
+
     /// Clean up stale sessions that have been idle too long.
     ///
     /// Sessions in `Init` state for longer than `max_idle` are considered stale
@@ -708,6 +719,36 @@ mod tests {
         session2.request_clipboard().unwrap();
 
         let handles = manager.clipboard_session_handles();
+        assert_eq!(handles.len(), 1);
+        assert_eq!(handles[0], h2);
+    }
+
+    #[test]
+    fn test_input_capture_session_handles() {
+        let mut manager = SessionManager::new();
+
+        let h1 = SessionManager::generate_session_handle();
+        let h2 = SessionManager::generate_session_handle();
+
+        manager
+            .create_session(
+                h1.clone(),
+                ":1.1".to_string(),
+                "app1".to_string(),
+                PersistMode::None,
+            )
+            .unwrap();
+        let session2 = manager
+            .create_session(
+                h2.clone(),
+                ":1.2".to_string(),
+                "app2".to_string(),
+                PersistMode::None,
+            )
+            .unwrap();
+        session2.is_input_capture_session = true;
+
+        let handles = manager.input_capture_session_handles();
         assert_eq!(handles.len(), 1);
         assert_eq!(handles[0], h2);
     }

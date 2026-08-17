@@ -181,6 +181,12 @@ pub struct WaylandConnection {
 pub struct SharedWaylandState {
     /// Current output sources (updated after each dispatch).
     pub sources: Vec<crate::types::SourceInfo>,
+    /// Current InputCapture zones (updated after each dispatch).
+    pub zones: Vec<crate::types::InputCaptureZone>,
+    /// Zone-set identifier, bumped (wraparound-safe) whenever `zones`
+    /// changes. Per spec, applications must be able to handle this ID
+    /// wrapping around.
+    pub zone_set: u32,
 }
 
 impl WaylandConnection {
@@ -222,6 +228,8 @@ impl WaylandConnection {
         // Build initial shared state
         let shared_state = Arc::new(Mutex::new(SharedWaylandState {
             sources: state.get_sources(),
+            zones: state.get_input_capture_zones(),
+            zone_set: 0,
         }));
 
         tracing::info!("Wayland connection established");
@@ -541,6 +549,14 @@ impl WaylandConnection {
     fn update_shared_state(&self) {
         if let Ok(mut shared) = self.shared_state.lock() {
             shared.sources = self.state.get_sources();
+
+            let new_zones = self.state.get_input_capture_zones();
+            if new_zones != shared.zones {
+                // Spec requires zone_set IDs to be safely wrappable, not
+                // just monotonically increasing.
+                shared.zone_set = shared.zone_set.wrapping_add(1);
+                shared.zones = new_zones;
+            }
         }
     }
 

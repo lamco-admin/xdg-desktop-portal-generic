@@ -113,6 +113,58 @@ pub struct StreamOutputMapping {
     pub height: u32,
 }
 
+/// A single InputCapture zone: one output's geometry in compositor-global
+/// coordinates.
+///
+/// Returned by `InputCapture.GetZones` as `a(uuii)` = (width, height, x, y).
+/// Deliberately a separate type from [`SourceInfo`] (which has no position
+/// fields) rather than a breaking addition to that published, non-exhaustive
+/// struct — see [`StreamOutputMapping`] for the same "need geometry outside
+/// the Wayland thread" precedent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputCaptureZone {
+    /// Zone width in pixels.
+    pub width: u32,
+    /// Zone height in pixels.
+    pub height: u32,
+    /// X position in compositor-global coordinates.
+    pub x: i32,
+    /// Y position in compositor-global coordinates.
+    pub y: i32,
+}
+
+/// A pointer barrier submitted via `InputCapture.SetPointerBarriers`.
+///
+/// Per spec, a barrier must be axis-aligned: horizontal (`y1 == y2`) or
+/// vertical (`x1 == x2`). Diagonal barriers are not supported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PointerBarrier {
+    /// Caller-assigned barrier identifier. Must be non-zero.
+    pub barrier_id: u32,
+    /// Start X coordinate.
+    pub x1: i32,
+    /// Start Y coordinate.
+    pub y1: i32,
+    /// End X coordinate.
+    pub x2: i32,
+    /// End Y coordinate.
+    pub y2: i32,
+}
+
+impl PointerBarrier {
+    /// Check structural validity: non-zero id, axis-aligned, non-degenerate.
+    ///
+    /// `horizontal ^ vertical` rejects both failure cases with one
+    /// condition: a degenerate point (`x1==x2 && y1==y2`) has both true
+    /// (XOR is false), and a diagonal has both false (XOR is false); a
+    /// proper axis-aligned barrier has exactly one true (XOR is true).
+    pub fn is_valid(&self) -> bool {
+        let horizontal = self.y1 == self.y2;
+        let vertical = self.x1 == self.x2;
+        self.barrier_id != 0 && (horizontal ^ vertical)
+    }
+}
+
 /// Device types for input injection.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DeviceTypes {
@@ -427,6 +479,66 @@ impl CursorMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_pointer_barrier_valid_horizontal() {
+        let barrier = PointerBarrier {
+            barrier_id: 1,
+            x1: 0,
+            y1: 100,
+            x2: 1920,
+            y2: 100,
+        };
+        assert!(barrier.is_valid());
+    }
+
+    #[test]
+    fn test_pointer_barrier_valid_vertical() {
+        let barrier = PointerBarrier {
+            barrier_id: 1,
+            x1: 1920,
+            y1: 0,
+            x2: 1920,
+            y2: 1080,
+        };
+        assert!(barrier.is_valid());
+    }
+
+    #[test]
+    fn test_pointer_barrier_rejects_diagonal() {
+        let barrier = PointerBarrier {
+            barrier_id: 1,
+            x1: 0,
+            y1: 0,
+            x2: 100,
+            y2: 100,
+        };
+        assert!(!barrier.is_valid());
+    }
+
+    #[test]
+    fn test_pointer_barrier_rejects_degenerate_point() {
+        let barrier = PointerBarrier {
+            barrier_id: 1,
+            x1: 50,
+            y1: 50,
+            x2: 50,
+            y2: 50,
+        };
+        assert!(!barrier.is_valid());
+    }
+
+    #[test]
+    fn test_pointer_barrier_rejects_zero_id() {
+        let barrier = PointerBarrier {
+            barrier_id: 0,
+            x1: 0,
+            y1: 0,
+            x2: 1920,
+            y2: 0,
+        };
+        assert!(!barrier.is_valid());
+    }
 
     #[test]
     fn test_device_types_bits() {

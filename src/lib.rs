@@ -59,6 +59,9 @@
 //! - `org.freedesktop.impl.portal.Clipboard` (v1) - Clipboard sync
 //! - `org.freedesktop.impl.portal.Settings` (v2) - Desktop appearance settings
 //! - `org.freedesktop.impl.portal.Screenshot` (v2) - Screen capture to file
+//! - `org.freedesktop.impl.portal.InputCapture` (v2) - Barrier-triggered input capture
+//!   (session lifecycle and zone geometry are real; barrier enforcement is not
+//!   implemented yet -- see the module docs on [`dbus::InputCaptureInterface`])
 
 #![warn(missing_docs)]
 #![warn(clippy::all)]
@@ -94,8 +97,9 @@ pub use services::{
 pub use session::{PersistMode, RestoreData, Session, SessionManager, SessionState};
 use tokio::sync::Mutex;
 pub use types::{
-    ButtonState, ClipboardData, CursorMode, DeviceTypes, InputEvent, KeyState, KeyboardEvent,
-    PointerEvent, ScrollAxis, SourceInfo, SourceType, StreamInfo, TouchEvent,
+    ButtonState, ClipboardData, CursorMode, DeviceTypes, InputCaptureZone, InputEvent, KeyState,
+    KeyboardEvent, PointerBarrier, PointerEvent, ScrollAxis, SourceInfo, SourceType, StreamInfo,
+    TouchEvent,
 };
 pub use wayland::{globals::AvailableProtocols as WaylandProtocols, screencopy::RawFrame};
 
@@ -187,10 +191,15 @@ impl PortalBackend {
     ///
     /// Registers the portal interfaces, sets up client disconnect monitoring,
     /// clipboard signal bridging, and runs until the service is stopped.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "linear interface-registration + task-spawning sequence; splitting it up would \
+                  scatter one coherent startup sequence across several arbitrarily-named helpers"
+    )]
     pub async fn run(&self) -> anyhow::Result<()> {
         use dbus::{
-            ClipboardInterface, ClipboardSignal, RemoteDesktopInterface, ScreenCastInterface,
-            ScreenshotInterface, SettingsInterface,
+            ClipboardInterface, ClipboardSignal, InputCaptureInterface, RemoteDesktopInterface,
+            ScreenCastInterface, ScreenshotInterface, SettingsInterface,
         };
 
         // Create clipboard interface with shared pending_writes
@@ -230,6 +239,17 @@ impl PortalBackend {
                 ),
             )?
             .serve_at("/org/freedesktop/portal/desktop", SettingsInterface::new())?
+            .serve_at(
+                "/org/freedesktop/portal/desktop",
+                InputCaptureInterface::new(
+                    Arc::clone(&self.session_manager),
+                    Arc::clone(&self.input_backend),
+                    Arc::clone(&self.capture_backend),
+                    Arc::clone(&self.pipewire_manager),
+                    self.available_protocols.clone(),
+                    self.shared_wayland_state.clone(),
+                ),
+            )?
             .build()
             .await?;
 
@@ -295,12 +315,21 @@ impl PortalBackend {
             Self::monitor_settings_changes(settings_conn).await;
         });
 
-        // Spawn output hotplug monitor (propagates wl_output changes to capture backends)
+        // Spawn output hotplug monitor (propagates wl_output changes to capture
+        // backends and emits InputCapture.ZonesChanged on zone-set changes)
         if let Some(shared_wayland) = &self.shared_wayland_state {
             let shared_wayland = Arc::clone(shared_wayland);
             let capture_backend = Arc::clone(&self.capture_backend);
+            let session_manager = Arc::clone(&self.session_manager);
+            let dbus_conn = connection.clone();
             tokio::spawn(async move {
-                Self::monitor_output_changes(shared_wayland, capture_backend).await;
+                Self::monitor_output_changes(
+                    shared_wayland,
+                    capture_backend,
+                    session_manager,
+                    dbus_conn,
+                )
+                .await;
             });
         }
 
@@ -513,24 +542,29 @@ impl PortalBackend {
 
     /// Monitor Wayland output changes and propagate to capture backends.
     ///
-    /// Periodically checks the shared Wayland state for output changes and
-    /// updates the capture backend's source list when outputs are added or removed.
+    /// Periodically checks the shared Wayland state for output changes,
+    /// updates the capture backend's source list when outputs are added or
+    /// removed, and emits `InputCapture.ZonesChanged` to every InputCapture
+    /// session when the zone set changes.
     async fn monitor_output_changes(
         shared_wayland: Arc<std::sync::Mutex<wayland::SharedWaylandState>>,
         capture_backend: Arc<Mutex<Box<dyn CaptureBackend>>>,
+        session_manager: Arc<Mutex<SessionManager>>,
+        connection: zbus::Connection,
     ) {
         use std::time::Duration;
         let mut interval = tokio::time::interval(Duration::from_secs(2));
         let mut last_source_count = 0u32;
+        let mut last_zone_set: Option<u32> = None;
 
         loop {
             interval.tick().await;
 
-            let current_sources = {
+            let (current_sources, current_zone_set) = {
                 let Ok(state) = shared_wayland.lock() else {
                     continue;
                 };
-                state.sources.clone()
+                (state.sources.clone(), state.zone_set)
             };
 
             let count = current_sources.len() as u32;
@@ -543,6 +577,41 @@ impl PortalBackend {
                 let mut backend = capture_backend.lock().await;
                 backend.update_sources(current_sources);
                 last_source_count = count;
+            }
+
+            if last_zone_set != Some(current_zone_set) {
+                last_zone_set = Some(current_zone_set);
+
+                let manager = session_manager.lock().await;
+                let handles = manager.input_capture_session_handles();
+                drop(manager);
+
+                if !handles.is_empty() {
+                    let iface_ref = connection
+                        .object_server()
+                        .interface::<_, dbus::InputCaptureInterface>(
+                            "/org/freedesktop/portal/desktop",
+                        )
+                        .await;
+
+                    if let Ok(iface) = iface_ref {
+                        let ctx = iface.signal_emitter();
+                        for handle in &handles {
+                            if let Err(e) = dbus::emit_zones_changed(ctx, handle.clone()).await {
+                                tracing::warn!(
+                                    session = %handle,
+                                    error = %e,
+                                    "Failed to emit ZonesChanged signal"
+                                );
+                            }
+                        }
+                        tracing::debug!(
+                            zone_set = current_zone_set,
+                            session_count = handles.len(),
+                            "Emitted ZonesChanged"
+                        );
+                    }
+                }
             }
         }
     }

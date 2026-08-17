@@ -29,6 +29,7 @@ ecosystem.
 | `Clipboard` | v1 | ext-data-control-v1 | wlr-data-control-v1 |
 | `Settings` | v2 | Environment variable config | GTK_THEME detection |
 | `Screenshot` | v2 | Single-frame capture to PNG | -- |
+| `InputCapture` | v2 | Session lifecycle, zones, EIS bridge | Barrier enforcement (Activated/Deactivated never fire yet) |
 
 Protocols are auto-detected at startup. The best available protocol is selected
 automatically with ext- protocols preferred over wlr- equivalents.
@@ -130,6 +131,7 @@ org.freedesktop.impl.portal.ScreenCast=generic
 org.freedesktop.impl.portal.Clipboard=generic
 org.freedesktop.impl.portal.Settings=generic
 org.freedesktop.impl.portal.Screenshot=generic
+org.freedesktop.impl.portal.InputCapture=generic
 ```
 
 See the [portal configuration docs](https://flatpak.github.io/xdg-desktop-portal/docs/portals.conf.html)
