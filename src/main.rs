@@ -51,6 +51,12 @@ async fn main() -> Result<()> {
         ));
     }
 
+    // InputCapture barrier-surface command channel, created before the event
+    // loop spawns -- the sender is only valid once wired in, and the
+    // WaylandConnection::spawn_event_loop* tuple shape can't grow another
+    // slot without breaking positionally-destructuring downstream consumers.
+    let input_capture_tx = wayland.create_input_capture_channel();
+
     // Spawn the Wayland event loop on a dedicated thread.
     // This continuously dispatches Wayland events (screencopy frames,
     // output hotplug, data control) and updates the shared state.
@@ -93,6 +99,7 @@ async fn main() -> Result<()> {
         screenshot_capture_tx,
     );
     backend.set_shared_wayland_state(shared_wayland_state);
+    backend.set_input_capture_channel(input_capture_tx);
 
     tracing::info!("Registering D-Bus interfaces...");
     backend.run().await?;

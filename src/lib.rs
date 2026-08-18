@@ -125,6 +125,10 @@ pub struct PortalBackend {
     capture_tx: mpsc::Sender<wayland::CaptureCommand>,
     /// Shared Wayland state for monitoring output changes.
     shared_wayland_state: Option<Arc<std::sync::Mutex<wayland::SharedWaylandState>>>,
+    /// InputCapture barrier-surface command sender. `None` in
+    /// configurations that don't wire it up (`Enable` negotiates
+    /// capabilities but creates no barrier surfaces).
+    input_capture_tx: Option<mpsc::Sender<wayland::InputCaptureCommand>>,
     /// Health event sender (cloned to subsystems).
     health_tx: health::HealthSender,
     /// Health event receiver (consumed by the portal backend's consumer).
@@ -151,6 +155,7 @@ impl PortalBackend {
             available_protocols,
             capture_tx,
             shared_wayland_state: None,
+            input_capture_tx: None,
             health_tx,
             health_rx: Some(health_rx),
         }
@@ -175,6 +180,15 @@ impl PortalBackend {
         state: Arc<std::sync::Mutex<wayland::SharedWaylandState>>,
     ) {
         self.shared_wayland_state = Some(state);
+    }
+
+    /// Set the InputCapture barrier-surface command channel.
+    ///
+    /// The sender must come from [`wayland::WaylandConnection::create_input_capture_channel`],
+    /// called before `spawn_event_loop*` -- the receiver is wired up at
+    /// spawn time.
+    pub fn set_input_capture_channel(&mut self, tx: mpsc::Sender<wayland::InputCaptureCommand>) {
+        self.input_capture_tx = Some(tx);
     }
 
     /// Get a reference to the session manager.
@@ -248,6 +262,7 @@ impl PortalBackend {
                     Arc::clone(&self.pipewire_manager),
                     self.available_protocols.clone(),
                     self.shared_wayland_state.clone(),
+                    self.input_capture_tx.clone(),
                 ),
             )?
             .build()
@@ -290,6 +305,7 @@ impl PortalBackend {
         let input_backend = Arc::clone(&self.input_backend);
         let capture_backend = Arc::clone(&self.capture_backend);
         let pipewire_manager = Arc::clone(&self.pipewire_manager);
+        let input_capture_tx = self.input_capture_tx.clone();
         let dbus_conn = connection.clone();
         tokio::spawn(async move {
             Self::monitor_client_disconnects(
@@ -298,6 +314,7 @@ impl PortalBackend {
                 input_backend,
                 capture_backend,
                 pipewire_manager,
+                input_capture_tx,
             )
             .await;
         });
@@ -346,6 +363,7 @@ impl PortalBackend {
         input_backend: Arc<Mutex<Box<dyn InputBackend>>>,
         capture_backend: Arc<Mutex<Box<dyn CaptureBackend>>>,
         pipewire_manager: Arc<pipewire::PipeWireManager>,
+        input_capture_tx: Option<mpsc::Sender<wayland::InputCaptureCommand>>,
     ) {
         use futures::StreamExt;
 
@@ -403,6 +421,15 @@ impl PortalBackend {
                             // Destroy PipeWire streams
                             for node_id in stream_ids {
                                 let _ = pipewire_manager.destroy_stream(node_id).await;
+                            }
+                        }
+
+                        // Destroy any InputCapture barrier surfaces
+                        if session.is_input_capture_session {
+                            if let Some(tx) = &input_capture_tx {
+                                let _ = tx.send(wayland::InputCaptureCommand::DestroySession {
+                                    session_id,
+                                });
                             }
                         }
                     }

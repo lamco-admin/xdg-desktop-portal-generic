@@ -28,6 +28,16 @@ pub struct AvailableProtocols {
     /// zwlr-data-control-manager-v1 (fallback).
     pub wlr_data_control: bool,
 
+    // === InputCapture (barrier surfaces) ===
+    /// wl_compositor is available (needed to create wl_surfaces for barriers).
+    pub wl_compositor: bool,
+    /// wlr-layer-shell-unstable-v1.
+    pub wlr_layer_shell: bool,
+    /// zwp-pointer-constraints-unstable-v1.
+    pub wp_pointer_constraints: bool,
+    /// zwp-relative-pointer-unstable-v1.
+    pub wp_relative_pointer: bool,
+
     // === Core ===
     /// wl_seat is available.
     pub seat: bool,
@@ -51,6 +61,19 @@ impl AvailableProtocols {
         self.ext_data_control || self.wlr_data_control
     }
 
+    /// Check if InputCapture barrier surfaces can be created and enforced.
+    ///
+    /// Requires all three: `wl_compositor` (to create the barrier surface),
+    /// `wlr-layer-shell-v1` (to place it precisely, invisibly), and both
+    /// pointer-constraints and relative-pointer (to actually lock the
+    /// pointer and read motion once captured -- Phase 2b).
+    pub fn has_input_capture_barriers(&self) -> bool {
+        self.wl_compositor
+            && self.wlr_layer_shell
+            && self.wp_pointer_constraints
+            && self.wp_relative_pointer
+    }
+
     /// Log a summary of detected protocols.
     pub fn log_summary(&self) {
         tracing::info!("Detected Wayland protocols:");
@@ -68,6 +91,14 @@ impl AvailableProtocols {
             "  Clipboard: ext-data-control={}, wlr-data-control={}",
             self.ext_data_control,
             self.wlr_data_control
+        );
+        tracing::info!(
+            "  InputCapture barriers: wl_compositor={}, wlr-layer-shell={}, \
+             pointer-constraints={}, relative-pointer={}",
+            self.wl_compositor,
+            self.wlr_layer_shell,
+            self.wp_pointer_constraints,
+            self.wp_relative_pointer
         );
         tracing::info!("  Core: seat={}, outputs={}", self.seat, self.output_count);
     }
@@ -118,5 +149,25 @@ mod tests {
         p.ext_data_control = false;
         p.wlr_data_control = true;
         assert!(p.has_clipboard());
+    }
+
+    #[test]
+    fn test_input_capture_barriers_requires_all_four() {
+        let mut p = AvailableProtocols::default();
+        assert!(!p.has_input_capture_barriers());
+
+        p.wl_compositor = true;
+        p.wlr_layer_shell = true;
+        p.wp_pointer_constraints = true;
+        assert!(!p.has_input_capture_barriers(), "missing relative-pointer");
+
+        p.wp_relative_pointer = true;
+        assert!(p.has_input_capture_barriers());
+
+        p.wl_compositor = false;
+        assert!(
+            !p.has_input_capture_barriers(),
+            "missing wl_compositor should fail even with everything else present"
+        );
     }
 }

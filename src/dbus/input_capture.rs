@@ -11,17 +11,26 @@
 //! validation, all real. `ConnectToEIS` reuses the existing
 //! [`InputBackend`] the same way `RemoteDesktop.ConnectToEIS` does.
 //!
-//! **Not yet implemented:** barrier geometry is never enforced against the
-//! actual pointer position. `Enable()` records that the session wants
-//! capture but no barrier surface exists, so `Activated`/`Deactivated`
-//! never fire. Real enforcement needs `wlr-layer-shell-v1` (an invisible
-//! barrier surface), `zwp_pointer_constraints_v1` (lock the pointer on
-//! entry), and `zwp_relative_pointer_v1` (motion after lock) — none of
-//! those Wayland protocols are bound yet. `Start()` logs a `tracing::warn!`
-//! the first time a client requests `POINTER` capability, so this gap is
-//! visible in logs rather than silent.
+//! # Phase 2a scope
+//!
+//! `Enable()` now sends the session's accepted barriers to the Wayland
+//! event loop, which creates real, invisible `wlr-layer-shell-v1` surfaces
+//! mapped at each barrier's position ([`crate::wayland::input_capture`]).
+//! `Disable()`/`Release()`/session close tear those surfaces down.
+//!
+//! **Still not implemented:** the barrier surfaces are inert -- nothing
+//! locks the pointer on entry or forwards relative motion, so
+//! `Activated`/`Deactivated` still never fire. Real enforcement needs
+//! `zwp_pointer_constraints_v1` (lock the pointer on entry) and
+//! `zwp_relative_pointer_v1` (motion after lock), both bound but unused
+//! until Phase 2b. `Start()` logs a `tracing::warn!` the first time a
+//! client requests `POINTER` capability, so this gap is visible in logs
+//! rather than silent.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, mpsc},
+};
 
 use tokio::sync::Mutex;
 use zbus::{
@@ -40,7 +49,7 @@ use crate::{
     },
     session::{PersistMode, SessionManager},
     types::{DeviceTypes, InputCaptureZone, PointerBarrier},
-    wayland::{AvailableProtocols, SharedWaylandState},
+    wayland::{AvailableProtocols, InputCaptureCommand, SharedWaylandState},
 };
 
 /// A barrier submitted via `SetPointerBarriers`, parsed but not yet
@@ -64,6 +73,10 @@ pub struct InputCaptureInterface {
     /// that don't wire it up (`GetZones` degrades to empty zones + `zone_set=0`
     /// with a one-time warning rather than failing).
     shared_wayland_state: Option<Arc<std::sync::Mutex<SharedWaylandState>>>,
+    /// Command sender to the Wayland event loop for barrier surface
+    /// lifecycle. `None` in configurations that don't wire it up (`Enable`
+    /// then negotiates capabilities but creates no surfaces, logged once).
+    input_capture_tx: Option<mpsc::Sender<InputCaptureCommand>>,
 }
 
 impl InputCaptureInterface {
@@ -75,6 +88,7 @@ impl InputCaptureInterface {
         pipewire_manager: Arc<PipeWireManager>,
         available_protocols: AvailableProtocols,
         shared_wayland_state: Option<Arc<std::sync::Mutex<SharedWaylandState>>>,
+        input_capture_tx: Option<mpsc::Sender<InputCaptureCommand>>,
     ) -> Self {
         Self {
             session_manager,
@@ -83,6 +97,7 @@ impl InputCaptureInterface {
             pipewire_manager,
             available_protocols,
             shared_wayland_state,
+            input_capture_tx,
         }
     }
 
@@ -98,6 +113,7 @@ impl InputCaptureInterface {
             Arc::clone(&self.input_backend),
             Arc::clone(&self.capture_backend),
             Arc::clone(&self.pipewire_manager),
+            self.input_capture_tx.clone(),
         );
         if let Err(e) = server.at(session_handle, session_iface).await {
             tracing::warn!(
@@ -635,6 +651,23 @@ impl InputCaptureInterface {
             .get_session_mut(&session_handle)
             .ok_or_else(|| PortalError::SessionNotFound(session_handle.to_string()))?;
         session.set_input_capture_enabled(true)?;
+        let barriers = session.input_capture_barriers.clone();
+        drop(manager);
+
+        if !barriers.is_empty() {
+            if let Some(tx) = &self.input_capture_tx {
+                let _ = tx.send(InputCaptureCommand::CreateBarrierSurfaces {
+                    session_id: session_handle.to_string(),
+                    barriers,
+                });
+            } else {
+                tracing::warn!(
+                    session_id = %session_handle,
+                    "InputCapture enabled with barriers set, but no Wayland command channel is \
+                     configured -- no barrier surfaces will be created"
+                );
+            }
+        }
 
         tracing::info!(session_id = %session_handle, "InputCapture enabled");
         Ok((Response::Success.to_u32(), empty_results()))
@@ -672,6 +705,12 @@ impl InputCaptureInterface {
         session.set_input_capture_enabled(false)?;
         drop(manager);
 
+        if let Some(tx) = &self.input_capture_tx {
+            let _ = tx.send(InputCaptureCommand::DestroySession {
+                session_id: session_handle.to_string(),
+            });
+        }
+
         if was_active {
             let _ = Self::deactivated(&emitter, session_handle.to_owned(), empty_results()).await;
         }
@@ -683,9 +722,15 @@ impl InputCaptureInterface {
 
     /// Release an active capture, returning control to the compositor.
     ///
-    /// Phase 1 has no active capture to release (`Activated` never fires),
-    /// so this is a no-op success -- accepted for spec-shape completeness
-    /// and forward compatibility with real clients.
+    /// No capture is ever active yet (`Activated` never fires -- barrier
+    /// surfaces exist but nothing locks the pointer on entry until Phase
+    /// 2b), so this tears down the session's barrier surfaces the same as
+    /// `Disable` and returns success. That's a placeholder, not the real
+    /// semantics: per spec `Release` should give back pointer control
+    /// while leaving the session's barriers armed to re-trigger, not
+    /// dismantle them. Revisit alongside Phase 2b's real activation path,
+    /// once there's an actual "release without disabling" case to get
+    /// right.
     ///
     /// # Errors
     ///
@@ -707,10 +752,17 @@ impl InputCaptureInterface {
 
         let manager = self.session_manager.lock().await;
         Self::validate_input_capture_session(&manager, &session_handle, app_id, &sender)?;
+        drop(manager);
+
+        if let Some(tx) = &self.input_capture_tx {
+            let _ = tx.send(InputCaptureCommand::DestroySession {
+                session_id: session_handle.to_string(),
+            });
+        }
 
         tracing::debug!(
             session_id = %session_handle,
-            "InputCapture.Release (no-op, nothing active in this build)"
+            "InputCapture.Release: barrier surfaces torn down, nothing else active in this build"
         );
         Ok(())
     }
@@ -834,22 +886,23 @@ impl InputCaptureInterface {
     /// Bitmask of capabilities this backend can actually deliver
     /// (1=KEYBOARD, 2=POINTER, 4=TOUCHSCREEN).
     ///
-    /// Requires both wlr virtual input protocols (needed by the EIS bridge
-    /// to forward captured input to the compositor) AND an actually-active
-    /// EIS backend (a compositor forced into `WlrVirtualInput` mode has no
-    /// `Notify*` fallback for InputCapture, unlike `RemoteDesktop`).
-    /// Touchscreen is never advertised -- no multi-touch injection path
-    /// exists, same rationale as `RemoteDesktop.AvailableDeviceTypes`.
+    /// Requires an actually-active EIS backend (a compositor forced into
+    /// `WlrVirtualInput` mode has no `Notify*` fallback for InputCapture,
+    /// unlike `RemoteDesktop`) AND the Wayland protocols that create and
+    /// enforce barrier surfaces (`wl_compositor`, `wlr-layer-shell-v1`,
+    /// pointer-constraints, relative-pointer -- see
+    /// [`AvailableProtocols::has_input_capture_barriers`]). Advertising
+    /// capability before the only mechanism that can ever activate a
+    /// session is bound would be a lie to the client. Touchscreen is never
+    /// advertised -- no multi-touch injection path exists, same rationale
+    /// as `RemoteDesktop.AvailableDeviceTypes`.
     #[zbus(property, name = "SupportedCapabilities")]
     async fn supported_capabilities(&self) -> u32 {
         let backend = self.input_backend.lock().await;
         let eis_active = backend.protocol_type() == InputProtocol::Eis;
         drop(backend);
 
-        if eis_active
-            && self.available_protocols.wlr_virtual_pointer
-            && self.available_protocols.zwp_virtual_keyboard
-        {
+        if eis_active && self.available_protocols.has_input_capture_barriers() {
             DeviceTypes {
                 keyboard: true,
                 pointer: true,

@@ -222,6 +222,7 @@ impl ScreenCastInterface {
                     Arc::clone(&self.input_backend),
                     Arc::clone(&self.capture_backend),
                     Arc::clone(&self.pipewire_manager),
+                    None,
                 );
                 if let Err(e) = server.at(&session_handle, session_iface).await {
                     tracing::warn!(

@@ -6,7 +6,10 @@
 //! session handle path. This allows clients and the frontend to close sessions
 //! via the D-Bus interface.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, mpsc},
+};
 
 use tokio::sync::Mutex;
 use zbus::{
@@ -19,6 +22,7 @@ use crate::{
     pipewire::PipeWireManager,
     services::{capture::CaptureBackend, input::InputBackend},
     session::SessionManager,
+    wayland::InputCaptureCommand,
 };
 
 /// Session D-Bus interface.
@@ -37,6 +41,10 @@ pub struct SessionInterface {
     capture_backend: Arc<Mutex<Box<dyn CaptureBackend>>>,
     /// PipeWire manager for destroying streams on close.
     pipewire_manager: Arc<PipeWireManager>,
+    /// InputCapture barrier-surface command sender. `None` for
+    /// RemoteDesktop/ScreenCast sessions, which never set
+    /// `is_input_capture_session` and so never send on it.
+    input_capture_tx: Option<mpsc::Sender<InputCaptureCommand>>,
 }
 
 impl SessionInterface {
@@ -47,6 +55,7 @@ impl SessionInterface {
         input_backend: Arc<Mutex<Box<dyn InputBackend>>>,
         capture_backend: Arc<Mutex<Box<dyn CaptureBackend>>>,
         pipewire_manager: Arc<PipeWireManager>,
+        input_capture_tx: Option<mpsc::Sender<InputCaptureCommand>>,
     ) -> Self {
         Self {
             session_manager,
@@ -54,6 +63,7 @@ impl SessionInterface {
             input_backend,
             capture_backend,
             pipewire_manager,
+            input_capture_tx,
         }
     }
 }
@@ -100,6 +110,13 @@ impl SessionInterface {
                 // Destroy PipeWire streams
                 for node_id in stream_ids {
                     let _ = self.pipewire_manager.destroy_stream(node_id).await;
+                }
+            }
+
+            // Destroy any InputCapture barrier surfaces
+            if session.is_input_capture_session {
+                if let Some(tx) = &self.input_capture_tx {
+                    let _ = tx.send(InputCaptureCommand::DestroySession { session_id });
                 }
             }
         }

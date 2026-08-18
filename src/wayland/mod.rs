@@ -17,6 +17,7 @@ pub mod data_control;
 pub mod dispatch;
 pub mod ext_capture;
 pub mod globals;
+pub mod input_capture;
 pub mod screencopy;
 
 use std::{
@@ -33,19 +34,27 @@ use data_control::DataControlManager;
 pub use data_control::{ClipboardCommand, SharedClipboardState};
 pub use dispatch::{OutputInfo, WaylandState};
 pub use globals::AvailableProtocols;
+pub use input_capture::InputCaptureBarrierState;
 use wayland_client::{
     Connection, EventQueue, QueueHandle,
     globals::{GlobalList, registry_queue_init},
-    protocol::{wl_output::WlOutput, wl_seat::WlSeat, wl_shm::WlShm},
+    protocol::{wl_compositor::WlCompositor, wl_output::WlOutput, wl_seat::WlSeat, wl_shm::WlShm},
 };
-use wayland_protocols::ext::{
-    data_control::v1::client::ext_data_control_manager_v1::ExtDataControlManagerV1,
-    image_capture_source::v1::client::ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1,
-    image_copy_capture::v1::client::ext_image_copy_capture_manager_v1::ExtImageCopyCaptureManagerV1,
+use wayland_protocols::{
+    ext::{
+        data_control::v1::client::ext_data_control_manager_v1::ExtDataControlManagerV1,
+        image_capture_source::v1::client::ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1,
+        image_copy_capture::v1::client::ext_image_copy_capture_manager_v1::ExtImageCopyCaptureManagerV1,
+    },
+    wp::{
+        pointer_constraints::zv1::client::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
+        relative_pointer::zv1::client::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
+    },
 };
 use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1;
 use wayland_protocols_wlr::{
     data_control::v1::client::zwlr_data_control_manager_v1::ZwlrDataControlManagerV1,
+    layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1,
     screencopy::v1::client::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
     virtual_pointer::v1::client::zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1,
 };
@@ -139,6 +148,30 @@ impl std::fmt::Debug for CaptureCommand {
     }
 }
 
+/// Commands sent from the InputCapture D-Bus interface to the Wayland event
+/// loop thread for managing barrier surface lifecycle.
+///
+/// Mirrors [`CaptureCommand`]'s role: the `EventQueue<WaylandState>` is
+/// `!Send` and lives on its own thread, so async D-Bus handler code can't
+/// touch Wayland objects directly.
+#[non_exhaustive]
+#[derive(Debug)]
+pub enum InputCaptureCommand {
+    /// Create layer-shell barrier surfaces for a session's accepted barriers.
+    CreateBarrierSurfaces {
+        /// Session handle (as a string, matching how other command enums
+        /// identify sessions).
+        session_id: String,
+        /// Accepted barriers to create surfaces for.
+        barriers: Vec<crate::types::PointerBarrier>,
+    },
+    /// Destroy all barrier surfaces for a session (Disable/Release/close).
+    DestroySession {
+        /// Session handle.
+        session_id: String,
+    },
+}
+
 /// Result type for Wayland operations.
 pub type Result<T> = std::result::Result<T, PortalError>;
 
@@ -171,6 +204,10 @@ pub struct WaylandConnection {
     force_wlr_screencopy: bool,
     /// Health event sender, passed to capture backends for metrics reporting.
     health_tx: Option<crate::health::HealthSender>,
+    /// Receiver for InputCapture barrier-surface commands from the D-Bus
+    /// interface. `None` unless [`Self::create_input_capture_channel`] was
+    /// called before [`Self::spawn_event_loop`]/[`Self::run_event_loop`].
+    input_capture_rx: Option<mpsc::Receiver<InputCaptureCommand>>,
 }
 
 /// Shared state that is safe to read from other threads.
@@ -244,6 +281,7 @@ impl WaylandConnection {
             shared_state,
             force_wlr_screencopy: false,
             health_tx: None,
+            input_capture_rx: None,
         })
     }
 
@@ -253,6 +291,20 @@ impl WaylandConnection {
     /// each capture backend (screencopy, ext-capture) when the event loop starts.
     pub fn set_health_sender(&mut self, tx: crate::health::HealthSender) {
         self.health_tx = Some(tx);
+    }
+
+    /// Create the InputCapture command channel and return the sender half.
+    ///
+    /// Must be called before `spawn_event_loop*`/`run_event_loop` --
+    /// mirrors [`Self::set_health_sender`]'s pre-spawn-only convention.
+    /// Deliberately does *not* add a 7th element to `spawn_event_loop`'s
+    /// return tuple: that tuple is destructured positionally by an external
+    /// consumer (`lamco-rdp-server-dev`'s `portal_generic.rs`), so any new
+    /// channel must be configured this way instead.
+    pub fn create_input_capture_channel(&mut self) -> mpsc::Sender<InputCaptureCommand> {
+        let (tx, rx) = mpsc::channel();
+        self.input_capture_rx = Some(rx);
+        tx
     }
 
     /// Detect available protocols from globals and bind them.
@@ -305,15 +357,63 @@ impl WaylandConnection {
             }
         }
 
-        // === SHM (required for screencopy/ext-capture SHM buffers) ===
+        // === SHM (required for screencopy/ext-capture/barrier-surface SHM buffers) ===
         match globals.bind::<WlShm, _, _>(qh, 1..=1, ()) {
             Ok(shm) => {
                 tracing::debug!("Bound wl_shm");
                 state.screencopy.shm = Some(shm.clone());
-                state.ext_capture.shm = Some(shm);
+                state.ext_capture.shm = Some(shm.clone());
+                state.input_capture.shm = Some(shm);
             }
             Err(e) => {
                 tracing::debug!("wl_shm not available: {}", e);
+            }
+        }
+
+        // === InputCapture barrier surfaces ===
+
+        match globals.bind::<WlCompositor, _, _>(qh, 1..=6, ()) {
+            Ok(compositor) => {
+                tracing::debug!("Bound wl_compositor");
+                state.compositor = Some(compositor.clone());
+                state.input_capture.compositor = Some(compositor);
+                protocols.wl_compositor = true;
+            }
+            Err(e) => {
+                tracing::debug!("wl_compositor not available: {}", e);
+            }
+        }
+
+        match globals.bind::<ZwlrLayerShellV1, _, _>(qh, 1..=5, ()) {
+            Ok(manager) => {
+                tracing::debug!("Bound zwlr_layer_shell_v1");
+                state.input_capture.layer_shell = Some(manager);
+                protocols.wlr_layer_shell = true;
+            }
+            Err(e) => {
+                tracing::debug!("zwlr_layer_shell_v1 not available: {}", e);
+            }
+        }
+
+        match globals.bind::<ZwpPointerConstraintsV1, _, _>(qh, 1..=1, ()) {
+            Ok(manager) => {
+                tracing::debug!("Bound zwp_pointer_constraints_v1");
+                state.input_capture.pointer_constraints = Some(manager);
+                protocols.wp_pointer_constraints = true;
+            }
+            Err(e) => {
+                tracing::debug!("zwp_pointer_constraints_v1 not available: {}", e);
+            }
+        }
+
+        match globals.bind::<ZwpRelativePointerManagerV1, _, _>(qh, 1..=1, ()) {
+            Ok(manager) => {
+                tracing::debug!("Bound zwp_relative_pointer_manager_v1");
+                state.input_capture.relative_pointer_manager = Some(manager);
+                protocols.wp_relative_pointer = true;
+            }
+            Err(e) => {
+                tracing::debug!("zwp_relative_pointer_manager_v1 not available: {}", e);
             }
         }
 
@@ -618,6 +718,9 @@ impl WaylandConnection {
             // Process clipboard commands from backends
             self.process_clipboard_commands(&clipboard_rx);
 
+            // Process InputCapture barrier-surface commands, if configured
+            self.process_input_capture_commands();
+
             // Check for ext-capture handshake timeouts
             let timeout = self.state.ext_capture.handshake_timeout;
             let timed_out = self.state.ext_capture.check_handshake_timeouts(timeout);
@@ -795,6 +898,49 @@ impl WaylandConnection {
                 }
                 ClipboardCommand::ReceiveFromOffer { mime_type, fd } => {
                     self.state.data_control.receive_from_offer(&mime_type, fd);
+                }
+            }
+        }
+    }
+
+    /// Process pending InputCapture barrier-surface commands.
+    ///
+    /// No-op if [`Self::create_input_capture_channel`] was never called
+    /// (`input_capture_rx` is `None`). Drains the channel into an owned
+    /// `Vec` first (rather than holding a borrow of `self.input_capture_rx`
+    /// across the loop body) so the loop body is free to mutate
+    /// `self.state` without fighting the borrow checker over disjoint
+    /// field access.
+    fn process_input_capture_commands(&mut self) {
+        let Some(rx) = &self.input_capture_rx else {
+            return;
+        };
+        let commands: Vec<InputCaptureCommand> = rx.try_iter().collect();
+
+        for cmd in commands {
+            match cmd {
+                InputCaptureCommand::CreateBarrierSurfaces {
+                    session_id,
+                    barriers,
+                } => {
+                    let zones = self.state.get_input_capture_zones_with_output();
+                    let outputs = self.state.outputs.clone();
+                    let find_output = move |global_name: u32| -> Option<WlOutput> {
+                        outputs.iter().find_map(|(output, info)| {
+                            let info = info.lock().ok()?;
+                            (info.global_name == global_name).then(|| output.clone())
+                        })
+                    };
+                    self.state.input_capture.create_barrier_surfaces(
+                        &self.queue_handle,
+                        &session_id,
+                        &barriers,
+                        &zones,
+                        find_output,
+                    );
+                }
+                InputCaptureCommand::DestroySession { session_id } => {
+                    self.state.input_capture.destroy_session(&session_id);
                 }
             }
         }

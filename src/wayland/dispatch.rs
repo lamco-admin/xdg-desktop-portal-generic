@@ -10,25 +10,32 @@ use wayland_client::{
     Connection, Dispatch, QueueHandle,
     globals::GlobalListContents,
     protocol::{
-        wl_buffer::WlBuffer, wl_output::WlOutput, wl_registry::WlRegistry, wl_seat::WlSeat,
-        wl_shm::WlShm, wl_shm_pool::WlShmPool,
+        wl_buffer::WlBuffer, wl_compositor::WlCompositor, wl_output::WlOutput,
+        wl_registry::WlRegistry, wl_seat::WlSeat, wl_shm::WlShm, wl_shm_pool::WlShmPool,
+        wl_surface::WlSurface,
     },
 };
-use wayland_protocols::ext::{
-    data_control::v1::client::{
-        ext_data_control_device_v1::{self, ExtDataControlDeviceV1},
-        ext_data_control_manager_v1::ExtDataControlManagerV1,
-        ext_data_control_offer_v1::{self, ExtDataControlOfferV1},
-        ext_data_control_source_v1::{self, ExtDataControlSourceV1},
+use wayland_protocols::{
+    ext::{
+        data_control::v1::client::{
+            ext_data_control_device_v1::{self, ExtDataControlDeviceV1},
+            ext_data_control_manager_v1::ExtDataControlManagerV1,
+            ext_data_control_offer_v1::{self, ExtDataControlOfferV1},
+            ext_data_control_source_v1::{self, ExtDataControlSourceV1},
+        },
+        image_capture_source::v1::client::{
+            ext_image_capture_source_v1::ExtImageCaptureSourceV1,
+            ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1,
+        },
+        image_copy_capture::v1::client::{
+            ext_image_copy_capture_frame_v1::{self, ExtImageCopyCaptureFrameV1},
+            ext_image_copy_capture_manager_v1::ExtImageCopyCaptureManagerV1,
+            ext_image_copy_capture_session_v1::{self, ExtImageCopyCaptureSessionV1},
+        },
     },
-    image_capture_source::v1::client::{
-        ext_image_capture_source_v1::ExtImageCaptureSourceV1,
-        ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1,
-    },
-    image_copy_capture::v1::client::{
-        ext_image_copy_capture_frame_v1::{self, ExtImageCopyCaptureFrameV1},
-        ext_image_copy_capture_manager_v1::ExtImageCopyCaptureManagerV1,
-        ext_image_copy_capture_session_v1::{self, ExtImageCopyCaptureSessionV1},
+    wp::{
+        pointer_constraints::zv1::client::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
+        relative_pointer::zv1::client::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
     },
 };
 use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::{
@@ -42,6 +49,10 @@ use wayland_protocols_wlr::{
         zwlr_data_control_offer_v1::{self, ZwlrDataControlOfferV1},
         zwlr_data_control_source_v1::{self, ZwlrDataControlSourceV1},
     },
+    layer_shell::v1::client::{
+        zwlr_layer_shell_v1::ZwlrLayerShellV1,
+        zwlr_layer_surface_v1::{self, ZwlrLayerSurfaceV1},
+    },
     screencopy::v1::client::{
         zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
         zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
@@ -53,7 +64,8 @@ use wayland_protocols_wlr::{
 };
 
 use super::{
-    data_control::DataControlState, ext_capture::ExtCaptureState, screencopy::ScreencopyState,
+    data_control::DataControlState, ext_capture::ExtCaptureState,
+    input_capture::InputCaptureBarrierState, screencopy::ScreencopyState,
 };
 use crate::types::{InputCaptureZone, SourceInfo};
 
@@ -131,6 +143,13 @@ pub struct WaylandState {
     /// Data control clipboard state (ext or wlr protocol).
     pub data_control: DataControlState,
 
+    // === InputCapture ===
+    /// wl_compositor, used to create barrier surfaces.
+    pub compositor: Option<WlCompositor>,
+    /// Barrier surface lifecycle state (layer-shell, pointer-constraints,
+    /// relative-pointer managers, plus live surfaces).
+    pub input_capture: InputCaptureBarrierState,
+
     // === Initialization ===
     /// Whether initial roundtrip is complete.
     pub initialized: bool,
@@ -169,6 +188,35 @@ impl WaylandState {
                         x: info.x,
                         y: info.y,
                     })
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Same as [`Self::get_input_capture_zones`], paired with each zone's
+    /// `wl_output` global name. Used internally to map a [`PointerBarrier`](
+    /// crate::types::PointerBarrier) to the specific output it lies on when
+    /// creating barrier surfaces -- `GetZones`'s D-Bus response doesn't need
+    /// the output identifier (per spec, just `a(uuii)`), so this stays a
+    /// separate method rather than changing `get_input_capture_zones`'s
+    /// public shape.
+    pub fn get_input_capture_zones_with_output(&self) -> Vec<(u32, InputCaptureZone)> {
+        self.outputs
+            .iter()
+            .filter_map(|(_, info)| {
+                let info = info.lock().ok()?;
+                if info.done && info.width > 0 && info.height > 0 {
+                    Some((
+                        info.global_name,
+                        InputCaptureZone {
+                            width: info.width,
+                            height: info.height,
+                            x: info.x,
+                            y: info.y,
+                        },
+                    ))
                 } else {
                     None
                 }
@@ -823,6 +871,105 @@ impl Dispatch<ExtDataControlOfferV1, ()> for WaylandState {
     ) {
         if let ext_data_control_offer_v1::Event::Offer { mime_type } = event {
             state.data_control.on_offer_mime_type(mime_type);
+        }
+    }
+}
+
+// === InputCapture barrier surface Dispatch impls ===
+
+impl Dispatch<WlCompositor, ()> for WaylandState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WlCompositor,
+        _event: <WlCompositor as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        // No events
+    }
+}
+
+impl Dispatch<WlSurface, ()> for WaylandState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WlSurface,
+        _event: <WlSurface as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        // Enter/Leave (output association) not needed for barrier surfaces.
+    }
+}
+
+impl Dispatch<ZwlrLayerShellV1, ()> for WaylandState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ZwlrLayerShellV1,
+        _event: <ZwlrLayerShellV1 as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        // No events
+    }
+}
+
+impl Dispatch<ZwpPointerConstraintsV1, ()> for WaylandState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ZwpPointerConstraintsV1,
+        _event: <ZwpPointerConstraintsV1 as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        // No events. Bound in Phase 2a, used starting Phase 2b.
+    }
+}
+
+impl Dispatch<ZwpRelativePointerManagerV1, ()> for WaylandState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ZwpRelativePointerManagerV1,
+        _event: <ZwpRelativePointerManagerV1 as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        // No events. Bound in Phase 2a, used starting Phase 2b.
+    }
+}
+
+impl Dispatch<ZwlrLayerSurfaceV1, (String, u32)> for WaylandState {
+    fn event(
+        state: &mut Self,
+        _proxy: &ZwlrLayerSurfaceV1,
+        event: <ZwlrLayerSurfaceV1 as wayland_client::Proxy>::Event,
+        (session_id, barrier_id): &(String, u32),
+        _conn: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwlr_layer_surface_v1::Event::Configure {
+                serial,
+                width,
+                height,
+            } => {
+                state.input_capture.on_configure(
+                    qh,
+                    session_id,
+                    *barrier_id,
+                    serial,
+                    width,
+                    height,
+                );
+            }
+            zwlr_layer_surface_v1::Event::Closed => {
+                state.input_capture.on_closed(session_id, *barrier_id);
+            }
+            _ => {}
         }
     }
 }
