@@ -34,7 +34,7 @@ use data_control::DataControlManager;
 pub use data_control::{ClipboardCommand, SharedClipboardState};
 pub use dispatch::{OutputInfo, WaylandState};
 pub use globals::AvailableProtocols;
-pub use input_capture::InputCaptureBarrierState;
+pub use input_capture::{InputCaptureActivationEvent, InputCaptureBarrierState};
 use wayland_client::{
     Connection, EventQueue, QueueHandle,
     globals::{GlobalList, registry_queue_init},
@@ -165,8 +165,14 @@ pub enum InputCaptureCommand {
         /// Accepted barriers to create surfaces for.
         barriers: Vec<crate::types::PointerBarrier>,
     },
-    /// Destroy all barrier surfaces for a session (Disable/Release/close).
+    /// Destroy all barrier surfaces for a session (Disable/close).
     DestroySession {
+        /// Session handle.
+        session_id: String,
+    },
+    /// Release only the currently-active lock for a session, leaving its
+    /// barrier surfaces mapped so they can re-trigger later (`Release`).
+    ReleaseActiveLock {
         /// Session handle.
         session_id: String,
     },
@@ -305,6 +311,20 @@ impl WaylandConnection {
         let (tx, rx) = mpsc::channel();
         self.input_capture_rx = Some(rx);
         tx
+    }
+
+    /// Set the sender for InputCapture activation-lifecycle events (barrier
+    /// lock/unlock, relative motion) headed out of the Wayland thread to
+    /// the async D-Bus/EIS bridge task.
+    ///
+    /// Must be called before `spawn_event_loop*` -- same pre-spawn-only
+    /// constraint as [`Self::create_input_capture_channel`], for the same
+    /// reason (no 7th slot on `spawn_event_loop*`'s return tuple).
+    pub fn set_input_capture_activation_sender(
+        &mut self,
+        tx: tokio::sync::mpsc::UnboundedSender<InputCaptureActivationEvent>,
+    ) {
+        self.state.input_capture.activation_tx = Some(tx);
     }
 
     /// Detect available protocols from globals and bind them.
@@ -941,6 +961,9 @@ impl WaylandConnection {
                 }
                 InputCaptureCommand::DestroySession { session_id } => {
                     self.state.input_capture.destroy_session(&session_id);
+                }
+                InputCaptureCommand::ReleaseActiveLock { session_id } => {
+                    self.state.input_capture.release_active_locks(&session_id);
                 }
             }
         }

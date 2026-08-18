@@ -11,8 +11,8 @@ use wayland_client::{
     globals::GlobalListContents,
     protocol::{
         wl_buffer::WlBuffer, wl_compositor::WlCompositor, wl_output::WlOutput,
-        wl_registry::WlRegistry, wl_seat::WlSeat, wl_shm::WlShm, wl_shm_pool::WlShmPool,
-        wl_surface::WlSurface,
+        wl_pointer::WlPointer, wl_registry::WlRegistry, wl_seat::WlSeat, wl_shm::WlShm,
+        wl_shm_pool::WlShmPool, wl_surface::WlSurface,
     },
 };
 use wayland_protocols::{
@@ -34,8 +34,14 @@ use wayland_protocols::{
         },
     },
     wp::{
-        pointer_constraints::zv1::client::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
-        relative_pointer::zv1::client::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
+        pointer_constraints::zv1::client::{
+            zwp_locked_pointer_v1::{self, ZwpLockedPointerV1},
+            zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
+        },
+        relative_pointer::zv1::client::{
+            zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
+            zwp_relative_pointer_v1::{self, ZwpRelativePointerV1},
+        },
     },
 };
 use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::{
@@ -130,6 +136,9 @@ pub struct WaylandState {
     // === Core ===
     /// Seat global.
     pub seat: Option<WlSeat>,
+    /// Pointer object, bound from the seat once it advertises the Pointer
+    /// capability. Used for InputCapture barrier locking (Phase 2b).
+    pub pointer: Option<WlPointer>,
     /// Known outputs with their info.
     pub outputs: Vec<(WlOutput, Arc<Mutex<OutputInfo>>)>,
 
@@ -286,22 +295,104 @@ impl Dispatch<WlRegistry, GlobalListContents> for WaylandState {
 
 impl Dispatch<WlSeat, ()> for WaylandState {
     fn event(
-        _state: &mut Self,
-        _proxy: &WlSeat,
+        state: &mut Self,
+        proxy: &WlSeat,
         event: <WlSeat as wayland_client::Proxy>::Event,
         _data: &(),
         _conn: &Connection,
-        _qh: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
     ) {
-        use wayland_client::protocol::wl_seat::Event;
+        use wayland_client::protocol::wl_seat::{Capability, Event};
         match event {
             Event::Capabilities { capabilities } => {
+                if let wayland_client::WEnum::Value(caps) = capabilities {
+                    if caps.contains(Capability::Pointer) && state.pointer.is_none() {
+                        state.pointer = Some(proxy.get_pointer(qh, ()));
+                        tracing::debug!("Bound wl_pointer from seat capabilities");
+                    }
+                }
                 tracing::debug!("Seat capabilities: {:?}", capabilities);
             }
             Event::Name { name } => {
                 tracing::debug!("Seat name: {}", name);
             }
             _ => {}
+        }
+    }
+}
+
+impl Dispatch<WlPointer, ()> for WaylandState {
+    fn event(
+        state: &mut Self,
+        _proxy: &WlPointer,
+        event: <WlPointer as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        use wayland_client::protocol::wl_pointer::Event;
+        match event {
+            Event::Enter { surface, .. } => {
+                let Some(pointer) = state.pointer.clone() else {
+                    return;
+                };
+                state.input_capture.on_pointer_enter(qh, &pointer, &surface);
+            }
+            Event::Leave { surface, .. } => {
+                state.input_capture.on_pointer_leave(&surface);
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ZwpLockedPointerV1, (String, u32)> for WaylandState {
+    fn event(
+        state: &mut Self,
+        _proxy: &ZwpLockedPointerV1,
+        event: <ZwpLockedPointerV1 as wayland_client::Proxy>::Event,
+        (session_id, barrier_id): &(String, u32),
+        _conn: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwp_locked_pointer_v1::Event::Locked => {
+                let Some(pointer) = state.pointer.clone() else {
+                    return;
+                };
+                state
+                    .input_capture
+                    .on_locked(qh, &pointer, session_id, *barrier_id);
+            }
+            zwp_locked_pointer_v1::Event::Unlocked => {
+                state.input_capture.on_unlocked(session_id, *barrier_id);
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ZwpRelativePointerV1, (String, u32)> for WaylandState {
+    fn event(
+        state: &mut Self,
+        _proxy: &ZwpRelativePointerV1,
+        event: <ZwpRelativePointerV1 as wayland_client::Proxy>::Event,
+        (session_id, _barrier_id): &(String, u32),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let zwp_relative_pointer_v1::Event::RelativeMotion {
+            utime_hi,
+            utime_lo,
+            dx,
+            dy,
+            ..
+        } = event
+        {
+            let time_usec = (u64::from(utime_hi) << 32) | u64::from(utime_lo);
+            state
+                .input_capture
+                .on_relative_motion(session_id, dx, dy, time_usec);
         }
     }
 }

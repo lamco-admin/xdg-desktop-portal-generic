@@ -129,6 +129,12 @@ pub struct PortalBackend {
     /// configurations that don't wire it up (`Enable` negotiates
     /// capabilities but creates no barrier surfaces).
     input_capture_tx: Option<mpsc::Sender<wayland::InputCaptureCommand>>,
+    /// InputCapture activation-lifecycle event receiver (barrier lock/
+    /// unlock, relative motion), consumed once by `run()`. `None` in
+    /// configurations that don't wire it up (locks never report
+    /// activation/motion/deactivation).
+    input_capture_activation_rx:
+        Option<tokio::sync::mpsc::UnboundedReceiver<wayland::InputCaptureActivationEvent>>,
     /// Health event sender (cloned to subsystems).
     health_tx: health::HealthSender,
     /// Health event receiver (consumed by the portal backend's consumer).
@@ -156,6 +162,7 @@ impl PortalBackend {
             capture_tx,
             shared_wayland_state: None,
             input_capture_tx: None,
+            input_capture_activation_rx: None,
             health_tx,
             health_rx: Some(health_rx),
         }
@@ -191,6 +198,18 @@ impl PortalBackend {
         self.input_capture_tx = Some(tx);
     }
 
+    /// Set the InputCapture activation-lifecycle event receiver.
+    ///
+    /// The sender must come from
+    /// [`wayland::WaylandConnection::set_input_capture_activation_sender`],
+    /// called before `spawn_event_loop*`.
+    pub fn set_input_capture_activation_receiver(
+        &mut self,
+        rx: tokio::sync::mpsc::UnboundedReceiver<wayland::InputCaptureActivationEvent>,
+    ) {
+        self.input_capture_activation_rx = Some(rx);
+    }
+
     /// Get a reference to the session manager.
     pub fn session_manager(&self) -> Arc<Mutex<SessionManager>> {
         Arc::clone(&self.session_manager)
@@ -210,7 +229,7 @@ impl PortalBackend {
         reason = "linear interface-registration + task-spawning sequence; splitting it up would \
                   scatter one coherent startup sequence across several arbitrarily-named helpers"
     )]
-    pub async fn run(&self) -> anyhow::Result<()> {
+    pub async fn run(&mut self) -> anyhow::Result<()> {
         use dbus::{
             ClipboardInterface, ClipboardSignal, InputCaptureInterface, RemoteDesktopInterface,
             ScreenCastInterface, ScreenshotInterface, SettingsInterface,
@@ -318,6 +337,23 @@ impl PortalBackend {
             )
             .await;
         });
+
+        // Spawn InputCapture activation bridge: Wayland barrier lock/unlock/
+        // motion → D-Bus Activated/Deactivated signals + EIS delivery
+        if let Some(activation_rx) = self.input_capture_activation_rx.take() {
+            let session_manager = Arc::clone(&self.session_manager);
+            let input_backend = Arc::clone(&self.input_backend);
+            let dbus_conn = connection.clone();
+            tokio::spawn(async move {
+                Self::input_capture_activation_bridge(
+                    dbus_conn,
+                    session_manager,
+                    input_backend,
+                    activation_rx,
+                )
+                .await;
+            });
+        }
 
         // Spawn periodic session cleanup task
         let session_manager = Arc::clone(&self.session_manager);
@@ -641,6 +677,211 @@ impl PortalBackend {
                 }
             }
         }
+    }
+
+    /// Bridge InputCapture activation-lifecycle events from Wayland to D-Bus/EIS.
+    ///
+    /// Receives `InputCaptureActivationEvent` messages from the Wayland
+    /// event loop (via barrier lock/unlock and relative-motion `Dispatch`
+    /// handlers) and drives the corresponding `Activated`/`Deactivated`
+    /// D-Bus signals plus EIS receiver-context delivery to the connected
+    /// client, structured like [`Self::clipboard_signal_bridge`].
+    async fn input_capture_activation_bridge(
+        connection: zbus::Connection,
+        session_manager: Arc<Mutex<SessionManager>>,
+        input_backend: Arc<Mutex<Box<dyn InputBackend>>>,
+        mut activation_rx: tokio::sync::mpsc::UnboundedReceiver<
+            wayland::InputCaptureActivationEvent,
+        >,
+    ) {
+        use wayland::InputCaptureActivationEvent;
+
+        tracing::info!("InputCapture activation bridge started");
+
+        while let Some(event) = activation_rx.recv().await {
+            match event {
+                InputCaptureActivationEvent::Activated {
+                    session_id,
+                    barrier_id,
+                } => {
+                    Self::handle_input_capture_activated(
+                        &connection,
+                        &session_manager,
+                        &input_backend,
+                        session_id,
+                        barrier_id,
+                    )
+                    .await;
+                }
+                InputCaptureActivationEvent::Motion {
+                    session_id,
+                    dx,
+                    dy,
+                    time_usec,
+                } => {
+                    let mut backend = input_backend.lock().await;
+                    if let Err(e) =
+                        backend.forward_captured_pointer_motion(&session_id, dx, dy, time_usec)
+                    {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            error = %e,
+                            "Failed to forward captured pointer motion"
+                        );
+                    }
+                }
+                InputCaptureActivationEvent::Deactivated {
+                    session_id,
+                    barrier_id,
+                } => {
+                    Self::handle_input_capture_deactivated(
+                        &connection,
+                        &session_manager,
+                        &input_backend,
+                        session_id,
+                        barrier_id,
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+
+    /// Handle an `Activated` event: begin the session's activation, tell
+    /// the EIS backend to start emulating, and emit the D-Bus signal.
+    ///
+    /// A barrier firing on a session with no live EIS receiver (the app
+    /// never called `ConnectToEIS`, or the backend can't do capture) is a
+    /// soft failure -- rolls the activation back and never claims capture
+    /// started.
+    async fn handle_input_capture_activated(
+        connection: &zbus::Connection,
+        session_manager: &Arc<Mutex<SessionManager>>,
+        input_backend: &Arc<Mutex<Box<dyn InputBackend>>>,
+        session_id: String,
+        barrier_id: u32,
+    ) {
+        let Ok(handle) = zbus::zvariant::ObjectPath::try_from(session_id.as_str()) else {
+            tracing::warn!(
+                session_id = %session_id,
+                "InputCapture activation for an invalid session handle"
+            );
+            return;
+        };
+
+        let mut manager = session_manager.lock().await;
+        let Some(session) = manager.get_session_mut(&handle) else {
+            drop(manager);
+            tracing::warn!(
+                session_id = %session_id,
+                "InputCapture activation for an unknown session"
+            );
+            return;
+        };
+        let activation_id = session.begin_input_capture_activation();
+        drop(manager);
+
+        let mut backend = input_backend.lock().await;
+        let start_result = backend.start_input_capture(&session_id);
+        drop(backend);
+
+        if let Err(e) = start_result {
+            tracing::warn!(
+                session_id = %session_id,
+                barrier_id,
+                error = %e,
+                "Failed to start EIS input capture -- rolling back activation"
+            );
+            let mut manager = session_manager.lock().await;
+            if let Some(session) = manager.get_session_mut(&handle) {
+                let _ = session.end_input_capture_activation();
+            }
+            return;
+        }
+
+        let iface_ref = connection
+            .object_server()
+            .interface::<_, dbus::InputCaptureInterface>("/org/freedesktop/portal/desktop")
+            .await;
+        if let Ok(iface) = iface_ref {
+            let ctx = iface.signal_emitter();
+            if let Err(e) = dbus::InputCaptureInterface::emit_activated(
+                ctx,
+                handle,
+                dbus::activated_options(activation_id, barrier_id),
+            )
+            .await
+            {
+                tracing::warn!(session_id = %session_id, error = %e, "Failed to emit Activated signal");
+            }
+        }
+        tracing::info!(
+            session_id = %session_id,
+            barrier_id,
+            activation_id,
+            "InputCapture activated"
+        );
+    }
+
+    /// Handle a `Deactivated` event: end the session's activation (if one
+    /// is still open -- `None` means `Disable()`/`Release()` already ended
+    /// it synchronously, so this skips emitting a duplicate signal), tell
+    /// the EIS backend to stop emulating, and emit the D-Bus signal.
+    async fn handle_input_capture_deactivated(
+        connection: &zbus::Connection,
+        session_manager: &Arc<Mutex<SessionManager>>,
+        input_backend: &Arc<Mutex<Box<dyn InputBackend>>>,
+        session_id: String,
+        barrier_id: u32,
+    ) {
+        let Ok(handle) = zbus::zvariant::ObjectPath::try_from(session_id.as_str()) else {
+            tracing::warn!(
+                session_id = %session_id,
+                "InputCapture deactivation for an invalid session handle"
+            );
+            return;
+        };
+
+        let mut manager = session_manager.lock().await;
+        let Some(session) = manager.get_session_mut(&handle) else {
+            drop(manager);
+            return;
+        };
+        let activation_id = session.end_input_capture_activation();
+        drop(manager);
+
+        let Some(activation_id) = activation_id else {
+            return;
+        };
+
+        let mut backend = input_backend.lock().await;
+        if let Err(e) = backend.stop_input_capture(&session_id) {
+            tracing::warn!(session_id = %session_id, error = %e, "Failed to stop EIS input capture");
+        }
+        drop(backend);
+
+        let iface_ref = connection
+            .object_server()
+            .interface::<_, dbus::InputCaptureInterface>("/org/freedesktop/portal/desktop")
+            .await;
+        if let Ok(iface) = iface_ref {
+            let ctx = iface.signal_emitter();
+            if let Err(e) = dbus::InputCaptureInterface::emit_deactivated(
+                ctx,
+                handle,
+                dbus::deactivated_options(activation_id),
+            )
+            .await
+            {
+                tracing::warn!(session_id = %session_id, error = %e, "Failed to emit Deactivated signal");
+            }
+        }
+        tracing::info!(
+            session_id = %session_id,
+            barrier_id,
+            activation_id,
+            "InputCapture deactivated"
+        );
     }
 
     /// Monitor settings for runtime changes and emit SettingChanged signals.

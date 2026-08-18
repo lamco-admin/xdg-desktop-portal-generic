@@ -57,6 +57,13 @@ async fn main() -> Result<()> {
     // slot without breaking positionally-destructuring downstream consumers.
     let input_capture_tx = wayland.create_input_capture_channel();
 
+    // Same pre-spawn-only constraint: InputCapture activation-lifecycle
+    // events (barrier lock/unlock, relative motion) flow out of the
+    // Wayland thread over this channel.
+    let (input_capture_activation_tx, input_capture_activation_rx) =
+        tokio::sync::mpsc::unbounded_channel();
+    wayland.set_input_capture_activation_sender(input_capture_activation_tx);
+
     // Spawn the Wayland event loop on a dedicated thread.
     // This continuously dispatches Wayland events (screencopy frames,
     // output hotplug, data control) and updates the shared state.
@@ -100,6 +107,7 @@ async fn main() -> Result<()> {
     );
     backend.set_shared_wayland_state(shared_wayland_state);
     backend.set_input_capture_channel(input_capture_tx);
+    backend.set_input_capture_activation_receiver(input_capture_activation_rx);
 
     tracing::info!("Registering D-Bus interfaces...");
     backend.run().await?;

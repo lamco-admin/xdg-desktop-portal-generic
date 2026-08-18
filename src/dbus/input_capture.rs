@@ -13,19 +13,26 @@
 //!
 //! # Phase 2a scope
 //!
-//! `Enable()` now sends the session's accepted barriers to the Wayland
-//! event loop, which creates real, invisible `wlr-layer-shell-v1` surfaces
-//! mapped at each barrier's position ([`crate::wayland::input_capture`]).
-//! `Disable()`/`Release()`/session close tear those surfaces down.
+//! `Enable()` sends the session's accepted barriers to the Wayland event
+//! loop, which creates real, invisible `wlr-layer-shell-v1` surfaces mapped
+//! at each barrier's position ([`crate::wayland::input_capture`]).
+//! `Disable()`/session close tear those surfaces down.
 //!
-//! **Still not implemented:** the barrier surfaces are inert -- nothing
-//! locks the pointer on entry or forwards relative motion, so
-//! `Activated`/`Deactivated` still never fire. Real enforcement needs
-//! `zwp_pointer_constraints_v1` (lock the pointer on entry) and
-//! `zwp_relative_pointer_v1` (motion after lock), both bound but unused
-//! until Phase 2b. `Start()` logs a `tracing::warn!` the first time a
-//! client requests `POINTER` capability, so this gap is visible in logs
-//! rather than silent.
+//! # Phase 2b scope
+//!
+//! Entering a barrier surface now really locks the pointer
+//! (`zwp_pointer_constraints_v1`) and forwards relative motion
+//! (`zwp_relative_pointer_v1`) to the connected EIS client, firing real
+//! `Activated`/`Deactivated` signals with the spec's `activation_id`
+//! correlation. `Release()` ends only the current activation, leaving
+//! barriers armed to re-trigger (distinct from `Disable()`, which tears
+//! down the barrier surfaces entirely).
+//!
+//! **Still not implemented:** no keyboard interface is grabbed for a
+//! captured session (`Start()` logs a `tracing::warn!` the first time a
+//! client requests `KEYBOARD` capability, so this gap is visible in logs
+//! rather than silent), and `cursor_position` (spec-optional on
+//! `Activated`/`Deactivated`/`Release`) is never computed.
 
 use std::{
     collections::HashMap,
@@ -99,6 +106,38 @@ impl InputCaptureInterface {
             shared_wayland_state,
             input_capture_tx,
         }
+    }
+
+    /// Emit an `Activated` D-Bus signal.
+    ///
+    /// Public wrapper around the zbus-generated signal method, allowing the
+    /// async activation bridge task in `lib.rs` to emit signals from
+    /// outside the interface implementation -- same rationale as
+    /// [`ClipboardInterface::emit_selection_owner_changed`](super::ClipboardInterface::emit_selection_owner_changed).
+    ///
+    /// # Errors
+    ///
+    /// Returns a `zbus::Error` if the D-Bus signal emission fails.
+    pub async fn emit_activated(
+        signal_emitter: &SignalEmitter<'_>,
+        session_handle: ObjectPath<'_>,
+        options: HashMap<String, OwnedValue>,
+    ) -> zbus::Result<()> {
+        Self::activated(signal_emitter, session_handle, options).await
+    }
+
+    /// Emit a `Deactivated` D-Bus signal. Same rationale as
+    /// [`Self::emit_activated`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a `zbus::Error` if the D-Bus signal emission fails.
+    pub async fn emit_deactivated(
+        signal_emitter: &SignalEmitter<'_>,
+        session_handle: ObjectPath<'_>,
+        options: HashMap<String, OwnedValue>,
+    ) -> zbus::Result<()> {
+        Self::deactivated(signal_emitter, session_handle, options).await
     }
 
     /// Register the `Session` D-Bus object for a newly-created InputCapture session.
@@ -470,11 +509,11 @@ impl InputCaptureInterface {
         let clipboard_enabled = session.clipboard_enabled;
         let persist_mode = session.persist_mode;
 
-        if negotiated.pointer {
+        if negotiated.keyboard {
             tracing::warn!(
                 session_id = %session_handle,
-                "InputCapture pointer capability negotiated, but barrier enforcement is not \
-                 implemented yet -- Enable() will not produce Activated/Deactivated signals"
+                "InputCapture keyboard capability negotiated, but no keyboard interface is \
+                 grabbed for captured sessions yet -- only pointer input is delivered"
             );
         }
 
@@ -701,7 +740,7 @@ impl InputCaptureInterface {
             .get_session_mut(&session_handle)
             .ok_or_else(|| PortalError::SessionNotFound(session_handle.to_string()))?;
 
-        let was_active = session.input_capture_active;
+        let activation_id = session.end_input_capture_activation();
         session.set_input_capture_enabled(false)?;
         drop(manager);
 
@@ -711,8 +750,13 @@ impl InputCaptureInterface {
             });
         }
 
-        if was_active {
-            let _ = Self::deactivated(&emitter, session_handle.to_owned(), empty_results()).await;
+        if let Some(activation_id) = activation_id {
+            let _ = Self::deactivated(
+                &emitter,
+                session_handle.to_owned(),
+                deactivated_options(activation_id),
+            )
+            .await;
         }
         let _ = Self::disabled(&emitter, session_handle.to_owned(), empty_results()).await;
 
@@ -722,15 +766,13 @@ impl InputCaptureInterface {
 
     /// Release an active capture, returning control to the compositor.
     ///
-    /// No capture is ever active yet (`Activated` never fires -- barrier
-    /// surfaces exist but nothing locks the pointer on entry until Phase
-    /// 2b), so this tears down the session's barrier surfaces the same as
-    /// `Disable` and returns success. That's a placeholder, not the real
-    /// semantics: per spec `Release` should give back pointer control
-    /// while leaving the session's barriers armed to re-trigger, not
-    /// dismantle them. Revisit alongside Phase 2b's real activation path,
-    /// once there's an actual "release without disabling" case to get
-    /// right.
+    /// Ends only the current activation -- unlike `Disable`, the session's
+    /// barrier surfaces stay mapped and can re-trigger a new activation
+    /// later. `activation_id` is accepted in `options` per spec (to
+    /// correlate which activation is being released) but not currently
+    /// validated against the session's own id -- there's at most one
+    /// activation per session at a time in this build, so the ambiguity
+    /// spec's `activation_id` exists to resolve can't arise here yet.
     ///
     /// # Errors
     ///
@@ -743,6 +785,7 @@ impl InputCaptureInterface {
         app_id: &str,
         options: HashMap<String, OwnedValue>,
         #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> zbus::fdo::Result<()> {
         let _ = &options;
         let sender = header
@@ -750,20 +793,31 @@ impl InputCaptureInterface {
             .ok_or_else(|| zbus::fdo::Error::Failed("Missing sender".to_string()))?
             .to_string();
 
-        let manager = self.session_manager.lock().await;
+        let mut manager = self.session_manager.lock().await;
         Self::validate_input_capture_session(&manager, &session_handle, app_id, &sender)?;
+
+        let session = manager
+            .get_session_mut(&session_handle)
+            .ok_or_else(|| PortalError::SessionNotFound(session_handle.to_string()))?;
+        let activation_id = session.end_input_capture_activation();
         drop(manager);
 
         if let Some(tx) = &self.input_capture_tx {
-            let _ = tx.send(InputCaptureCommand::DestroySession {
+            let _ = tx.send(InputCaptureCommand::ReleaseActiveLock {
                 session_id: session_handle.to_string(),
             });
         }
 
-        tracing::debug!(
-            session_id = %session_handle,
-            "InputCapture.Release: barrier surfaces torn down, nothing else active in this build"
-        );
+        if let Some(activation_id) = activation_id {
+            let _ = Self::deactivated(
+                &emitter,
+                session_handle.to_owned(),
+                deactivated_options(activation_id),
+            )
+            .await;
+        }
+
+        tracing::debug!(session_id = %session_handle, "InputCapture.Release");
         Ok(())
     }
 
@@ -939,6 +993,26 @@ pub async fn emit_zones_changed(
     session_handle: ObjectPath<'_>,
 ) -> zbus::Result<()> {
     InputCaptureInterface::zones_changed(signal_emitter, session_handle, empty_results()).await
+}
+
+/// Build the `options` map for an `Activated` signal.
+///
+/// `cursor_position` is spec-optional and deliberately omitted -- resolving
+/// a barrier-surface-local coordinate into compositor-global space needs
+/// its own review, not attempted here.
+pub fn activated_options(activation_id: u32, barrier_id: u32) -> HashMap<String, OwnedValue> {
+    let mut options = HashMap::new();
+    options.insert("activation_id".to_string(), OwnedValue::from(activation_id));
+    options.insert("barrier_id".to_string(), OwnedValue::from(barrier_id));
+    options
+}
+
+/// Build the `options` map for a `Deactivated` signal (echoes the same
+/// `activation_id` from the corresponding `Activated`).
+pub fn deactivated_options(activation_id: u32) -> HashMap<String, OwnedValue> {
+    let mut options = HashMap::new();
+    options.insert("activation_id".to_string(), OwnedValue::from(activation_id));
+    options
 }
 
 /// Convert a `Vec<u32>` to `OwnedValue` (`au`).

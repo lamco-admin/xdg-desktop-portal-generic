@@ -37,7 +37,7 @@ pub use eis_bridge::EisBridgeBackend;
 pub use wlr_backend::WlrInputBackend;
 
 use crate::{
-    error::Result,
+    error::{PortalError, Result},
     types::{DeviceTypes, InputEvent},
 };
 
@@ -161,6 +161,51 @@ pub trait InputBackend: Send + Sync {
     /// for input operations (event counts, EIS frame serials, disconnects).
     fn set_health_sender(&mut self, _tx: crate::health::HealthSender) {
         // Default no-op for backends that don't implement health monitoring
+    }
+
+    /// Notify the connected EIS client for `session_id` that captured
+    /// input is starting (`InputCapture.Activated`).
+    ///
+    /// Only meaningful for a backend with a receiver-context EIS session --
+    /// capturing input requires EIS specifically. The default returns an
+    /// error rather than silently no-opping: unlike [`Self::set_stream_mappings`]/
+    /// [`Self::set_health_sender`], a silent no-op here would let a real
+    /// `Activated` D-Bus signal fire without the client ever being told,
+    /// which is worse than a loud, logged failure.
+    fn start_input_capture(&mut self, session_id: &str) -> Result<()> {
+        let _ = session_id;
+        Err(PortalError::InvalidState {
+            expected: "EIS backend with an active receiver-context session".to_string(),
+            actual: "this backend has no InputCapture activation support".to_string(),
+        })
+    }
+
+    /// Forward one relative-motion sample to the EIS client for
+    /// `session_id` while capture is active. Same default-error rationale
+    /// as [`Self::start_input_capture`].
+    fn forward_captured_pointer_motion(
+        &mut self,
+        session_id: &str,
+        dx: f64,
+        dy: f64,
+        time_usec: u64,
+    ) -> Result<()> {
+        let _ = (session_id, dx, dy, time_usec);
+        Err(PortalError::InvalidState {
+            expected: "EIS backend with an active receiver-context session".to_string(),
+            actual: "this backend has no InputCapture activation support".to_string(),
+        })
+    }
+
+    /// Notify the connected EIS client for `session_id` that captured
+    /// input has stopped (`InputCapture.Deactivated`). Same default-error
+    /// rationale as [`Self::start_input_capture`].
+    fn stop_input_capture(&mut self, session_id: &str) -> Result<()> {
+        let _ = session_id;
+        Err(PortalError::InvalidState {
+            expected: "EIS backend with an active receiver-context session".to_string(),
+            actual: "this backend has no InputCapture activation support".to_string(),
+        })
     }
 }
 

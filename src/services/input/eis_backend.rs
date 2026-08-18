@@ -48,6 +48,10 @@ pub struct EisSession {
     context: eis::Context,
     /// Session phase.
     phase: SessionPhase,
+    /// Monotonic sequence counter for `start_emulating` calls
+    /// (`ActiveReceiver` phase only; a session may activate/deactivate/
+    /// reactivate across multiple barrier crossings during its lifetime).
+    next_sequence: u32,
 }
 
 enum SessionPhase {
@@ -56,8 +60,11 @@ enum SessionPhase {
         handshaker: EisHandshaker,
         capabilities: BitFlags<DeviceCapability>,
     },
-    /// Handshake complete, actively processing events.
-    Active {
+    /// Handshake complete, client is the Sender: it emulates input by
+    /// sending requests, which `converter` turns into `EisRequest`s this
+    /// session forwards to the compositor (the existing `RemoteDesktop`
+    /// data flow).
+    ActiveSender {
         converter: EisRequestConverter,
         #[expect(dead_code, reason = "seat must stay alive while session is active")]
         seat: Seat,
@@ -65,6 +72,17 @@ enum SessionPhase {
             dead_code,
             reason = "device must stay alive for EIS protocol lifecycle"
         )]
+        device: Device,
+    },
+    /// Handshake complete, client is the Receiver: this session is the one
+    /// producing events via `device`/`start_emulating`/`send_pointer_motion`
+    /// (the `InputCapture` data flow). `converter` is still needed --
+    /// it answers `ei_connection.sync` and `ei_seat.bind`, which the
+    /// client sends regardless of context direction.
+    ActiveReceiver {
+        converter: EisRequestConverter,
+        #[expect(dead_code, reason = "seat must stay alive while session is active")]
+        seat: Seat,
         device: Device,
     },
 }
@@ -100,6 +118,7 @@ impl EisSession {
                 handshaker,
                 capabilities,
             },
+            next_sequence: 0,
         };
 
         Ok((session, client_fd))
@@ -132,7 +151,8 @@ impl EisSession {
 
         match &mut self.phase {
             SessionPhase::AwaitingHandshake { .. } => self.process_handshake(),
-            SessionPhase::Active { converter, .. } => {
+            SessionPhase::ActiveSender { converter, .. }
+            | SessionPhase::ActiveReceiver { converter, .. } => {
                 Ok(Self::process_active(&self.context, converter))
             }
         }
@@ -201,6 +221,12 @@ impl EisSession {
             "EIS handshake complete"
         );
 
+        // Sender: client emulates input by sending to us (RemoteDesktop's
+        // existing data flow). Receiver: we emulate by sending to the
+        // client (InputCapture's data flow, Phase 2b). `resp` is consumed
+        // below, so capture the direction first.
+        let is_receiver = resp.context_type == eis::handshake::ContextType::Receiver;
+
         let converter = EisRequestConverter::new(&self.context, resp, 1);
         let connection = converter.handle().clone();
 
@@ -225,12 +251,20 @@ impl EisSession {
         // Flush the seat/device/resumed events to the client
         let _ = self.context.flush();
 
-        tracing::debug!("EIS session active, device resumed");
+        tracing::debug!(is_receiver, "EIS session active, device resumed");
 
-        self.phase = SessionPhase::Active {
-            converter,
-            seat,
-            device,
+        self.phase = if is_receiver {
+            SessionPhase::ActiveReceiver {
+                converter,
+                seat,
+                device,
+            }
+        } else {
+            SessionPhase::ActiveSender {
+                converter,
+                seat,
+                device,
+            }
         };
     }
 
@@ -269,9 +303,91 @@ impl EisSession {
         events
     }
 
-    /// Check if the handshake is complete and the session is active.
+    /// Check if the handshake is complete and the session is active
+    /// (either direction).
     pub fn is_active(&self) -> bool {
-        matches!(self.phase, SessionPhase::Active { .. })
+        matches!(
+            self.phase,
+            SessionPhase::ActiveSender { .. } | SessionPhase::ActiveReceiver { .. }
+        )
+    }
+
+    /// Check if this session is active in the Receiver direction
+    /// (InputCapture: this session emulates input, the client receives).
+    pub fn is_receiver(&self) -> bool {
+        matches!(self.phase, SessionPhase::ActiveReceiver { .. })
+    }
+
+    /// Notify the client that this device is about to start sending
+    /// captured input events.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PortalError::InvalidState` if the session isn't an active
+    /// Receiver-context session.
+    pub fn start_emulating(&mut self) -> Result<()> {
+        let SessionPhase::ActiveReceiver { device, .. } = &self.phase else {
+            return Err(PortalError::InvalidState {
+                expected: "receiver-context EIS session, active".to_string(),
+                actual: "session not in an active receiver phase".to_string(),
+            });
+        };
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        device.start_emulating(sequence);
+        let _ = self.context.flush();
+        Ok(())
+    }
+
+    /// Notify the client that this device is no longer sending captured
+    /// input events.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PortalError::InvalidState` if the session isn't an active
+    /// Receiver-context session.
+    pub fn stop_emulating(&mut self) -> Result<()> {
+        let SessionPhase::ActiveReceiver { device, .. } = &self.phase else {
+            return Err(PortalError::InvalidState {
+                expected: "receiver-context EIS session, active".to_string(),
+                actual: "session not in an active receiver phase".to_string(),
+            });
+        };
+        device.stop_emulating();
+        let _ = self.context.flush();
+        Ok(())
+    }
+
+    /// Send one relative pointer motion sample to the client, grouped into
+    /// its own logical hardware event (`frame`).
+    ///
+    /// # Errors
+    ///
+    /// Returns `PortalError::InvalidState` if the session isn't an active
+    /// Receiver-context session, or if the device has no pointer interface
+    /// (the client didn't request pointer capability).
+    pub fn send_pointer_motion(&mut self, dx: f64, dy: f64, time_usec: u64) -> Result<()> {
+        let SessionPhase::ActiveReceiver { device, .. } = &self.phase else {
+            return Err(PortalError::InvalidState {
+                expected: "receiver-context EIS session, active".to_string(),
+                actual: "session not in an active receiver phase".to_string(),
+            });
+        };
+        let Some(pointer) = device.interface::<eis::Pointer>() else {
+            return Err(PortalError::InvalidState {
+                expected: "device with pointer capability bound".to_string(),
+                actual: "device has no ei_pointer interface".to_string(),
+            });
+        };
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "EIS motion_relative wire format is f32; sub-pixel precision loss is \
+                      acceptable for relative pointer motion"
+        )]
+        pointer.motion_relative(dx as f32, dy as f32);
+        device.frame(time_usec);
+        let _ = self.context.flush();
+        Ok(())
     }
 }
 
@@ -328,5 +444,20 @@ mod tests {
         assert!(!session.is_active());
         // fd should be valid
         assert!(fd.as_raw_fd() >= 0);
+    }
+
+    #[test]
+    fn test_eis_session_new_is_not_receiver() {
+        let (session, _fd) = EisSession::new(DeviceTypes::all()).unwrap();
+        assert!(!session.is_receiver());
+    }
+
+    #[test]
+    fn test_receiver_methods_error_before_handshake_completes() {
+        let (mut session, _fd) = EisSession::new(DeviceTypes::all()).unwrap();
+
+        assert!(session.start_emulating().is_err());
+        assert!(session.stop_emulating().is_err());
+        assert!(session.send_pointer_motion(1.0, 2.0, 0).is_err());
     }
 }

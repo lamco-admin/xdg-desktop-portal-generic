@@ -129,13 +129,18 @@ pub struct Session {
     /// `Started` session can be enabled/disabled repeatedly without
     /// restarting.
     pub input_capture_enabled: bool,
-    /// Whether a barrier has actually fired. Always `false` until real
-    /// barrier enforcement is implemented; kept now so `Disable()`'s
-    /// "emit `Deactivated` before `Disabled` if active" ordering is
-    /// already correct once enforcement lands.
+    /// Whether a barrier has actually fired (pointer locked, capture in
+    /// progress).
     pub input_capture_active: bool,
     /// Barriers from the most recent successful `SetPointerBarriers` call.
     pub input_capture_barriers: Vec<PointerBarrier>,
+    /// Monotonic counter for `activation_id` values handed out by
+    /// [`Self::begin_input_capture_activation`].
+    pub input_capture_next_activation_id: u32,
+    /// The current activation's id, per the spec's `Activated`/
+    /// `Deactivated`/`Release` `activation_id` contract. `None` when no
+    /// activation is in progress.
+    pub input_capture_activation_id: Option<u32>,
 
     // Persistence
     /// Persistence mode for this session.
@@ -179,6 +184,8 @@ impl Session {
             input_capture_enabled: false,
             input_capture_active: false,
             input_capture_barriers: Vec::new(),
+            input_capture_next_activation_id: 0,
+            input_capture_activation_id: None,
 
             persist_mode: PersistMode::None,
             restore_token: None,
@@ -368,6 +375,10 @@ impl Session {
         self.input_capture_enabled = enabled;
         if !enabled {
             self.input_capture_active = false;
+            // Prevents a stale id from producing a duplicate Deactivated
+            // later -- end_input_capture_activation() already no-ops
+            // safely on None.
+            self.input_capture_activation_id = None;
         }
         tracing::debug!(
             session_id = %self.id,
@@ -375,6 +386,28 @@ impl Session {
             "InputCapture enabled state changed"
         );
         Ok(())
+    }
+
+    /// Begin a new InputCapture activation: bumps the counter, marks the
+    /// session active, and returns the new `activation_id` for the
+    /// `Activated` signal's `options`.
+    pub fn begin_input_capture_activation(&mut self) -> u32 {
+        let id = self.input_capture_next_activation_id;
+        self.input_capture_next_activation_id =
+            self.input_capture_next_activation_id.wrapping_add(1);
+        self.input_capture_activation_id = Some(id);
+        self.input_capture_active = true;
+        id
+    }
+
+    /// End the current InputCapture activation, if any. Returns the
+    /// `activation_id` that was active (for the `Deactivated` signal's
+    /// `options`), or `None` if there wasn't one -- e.g. `Disable()`
+    /// already ended it, so the caller should skip emitting a duplicate
+    /// signal.
+    pub fn end_input_capture_activation(&mut self) -> Option<u32> {
+        self.input_capture_active = false;
+        self.input_capture_activation_id.take()
     }
 
     /// Replace this session's pointer barriers with a newly-accepted set.
@@ -573,6 +606,50 @@ mod tests {
         session.set_input_capture_enabled(false).unwrap();
         assert!(!session.input_capture_enabled);
         assert!(!session.input_capture_active);
+    }
+
+    #[test]
+    fn test_input_capture_activation_id_sequencing() {
+        let mut session = test_session();
+        assert_eq!(session.input_capture_activation_id, None);
+
+        let first = session.begin_input_capture_activation();
+        assert_eq!(first, 0);
+        assert!(session.input_capture_active);
+        assert_eq!(session.input_capture_activation_id, Some(0));
+
+        let ended = session.end_input_capture_activation();
+        assert_eq!(ended, Some(0));
+        assert!(!session.input_capture_active);
+        assert_eq!(session.input_capture_activation_id, None);
+
+        // Counter keeps advancing across repeated activations.
+        let second = session.begin_input_capture_activation();
+        assert_eq!(second, 1);
+    }
+
+    #[test]
+    fn test_input_capture_end_activation_without_begin_is_none() {
+        let mut session = test_session();
+        // No activation in progress -- e.g. Disable() already ended it.
+        assert_eq!(session.end_input_capture_activation(), None);
+    }
+
+    #[test]
+    fn test_input_capture_disable_clears_activation_id() {
+        let mut session = test_session();
+        session.select_devices(DeviceTypes::all()).unwrap();
+        session.start(vec![]).unwrap();
+
+        session.set_input_capture_enabled(true).unwrap();
+        session.begin_input_capture_activation();
+        assert!(session.input_capture_activation_id.is_some());
+
+        session.set_input_capture_enabled(false).unwrap();
+        assert_eq!(session.input_capture_activation_id, None);
+        // A late end_input_capture_activation() (e.g. from a stray
+        // Deactivated event) must not fire a duplicate signal.
+        assert_eq!(session.end_input_capture_activation(), None);
     }
 
     #[test]

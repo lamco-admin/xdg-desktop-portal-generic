@@ -22,7 +22,9 @@ use std::collections::HashMap;
 pub use clipboard::{
     ClipboardInterface, ClipboardSignal, PendingWriteEntry, PendingWrites, next_clipboard_serial,
 };
-pub use input_capture::{InputCaptureInterface, emit_zones_changed};
+pub use input_capture::{
+    InputCaptureInterface, activated_options, deactivated_options, emit_zones_changed,
+};
 pub use remote_desktop::RemoteDesktopInterface;
 pub use request::RequestInterface;
 pub use screencast::ScreenCastInterface;

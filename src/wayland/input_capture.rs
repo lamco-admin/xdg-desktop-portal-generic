@@ -1,30 +1,39 @@
-//! InputCapture barrier surface lifecycle (Phase 2a).
+//! InputCapture barrier surface lifecycle (Phase 2b).
 //!
 //! Creates invisible `wlr-layer-shell-v1` surfaces positioned at each
 //! accepted [`PointerBarrier`], drives the `configure -> ack_configure ->
 //! attach buffer -> commit` mapping lifecycle so the surfaces genuinely map
 //! on a live compositor, and tears them down on `Disable`/`Release`/session
-//! close.
+//! close (Phase 2a). On top of that, locks the pointer on entry
+//! (`zwp_pointer_constraints_v1`), reads relative motion once locked
+//! (`zwp_relative_pointer_v1`), and reports activation/motion/deactivation
+//! to the async D-Bus/EIS bridge task over [`InputCaptureActivationEvent`]
+//! (Phase 2b).
 //!
-//! **Phase 2a scope:** surfaces map, nothing more. The pointer is never
-//! locked (`zwp_pointer_constraints_v1`) and relative motion is never read
-//! (`zwp_relative_pointer_v1`) -- both managers are bound here (see
-//! [`InputCaptureBarrierState`]) but unused until Phase 2b, which also
-//! wires `wl_pointer` enter/leave detection on these surfaces to actually
-//! trigger a lock. See the Phase 2b design section of the implementation
-//! plan for the full activation path.
+//! **Still not implemented:** no keyboard interface is grabbed for a
+//! captured session, and `cursor_position` (spec-optional on
+//! `Activated`/`Deactivated`/`Release`) is never computed -- both are
+//! documented gaps, not oversights.
 
 use std::collections::HashMap;
 
+use tokio::sync::mpsc::UnboundedSender;
 use wayland_client::{
     QueueHandle,
     protocol::{
-        wl_compositor::WlCompositor, wl_output::WlOutput, wl_shm::WlShm, wl_surface::WlSurface,
+        wl_compositor::WlCompositor, wl_output::WlOutput, wl_pointer::WlPointer, wl_shm::WlShm,
+        wl_surface::WlSurface,
     },
 };
 use wayland_protocols::wp::{
-    pointer_constraints::zv1::client::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
-    relative_pointer::zv1::client::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
+    pointer_constraints::zv1::client::{
+        zwp_locked_pointer_v1::ZwpLockedPointerV1,
+        zwp_pointer_constraints_v1::{Lifetime, ZwpPointerConstraintsV1},
+    },
+    relative_pointer::zv1::client::{
+        zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
+        zwp_relative_pointer_v1::ZwpRelativePointerV1,
+    },
 };
 use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{self, ZwlrLayerShellV1},
@@ -36,6 +45,44 @@ use super::{
     screencopy::{BufferFormatInfo, ShmFrameBuffer},
 };
 use crate::types::{InputCaptureZone, PointerBarrier};
+
+/// An activation-lifecycle event reported from the Wayland thread's barrier
+/// lock/relative-motion handling to the async bridge task
+/// (`PortalBackend::input_capture_activation_bridge` in `lib.rs`).
+///
+/// Sent over a plain [`UnboundedSender`] -- non-blocking and callable from
+/// this module's synchronous `Dispatch` handlers, the same mechanism
+/// `ClipboardSignal` already uses from `on_selection_changed`'s callback.
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub enum InputCaptureActivationEvent {
+    /// The pointer locked on entering a barrier surface: capture starts.
+    Activated {
+        /// Session handle (as a string).
+        session_id: String,
+        /// Barrier that triggered.
+        barrier_id: u32,
+    },
+    /// Relative pointer motion while a lock is active.
+    Motion {
+        /// Session handle (as a string).
+        session_id: String,
+        /// Horizontal delta in pixels.
+        dx: f64,
+        /// Vertical delta in pixels.
+        dy: f64,
+        /// Event timestamp in microseconds.
+        time_usec: u64,
+    },
+    /// The lock deactivated (oneshot lock defunct, or explicitly released):
+    /// capture stops.
+    Deactivated {
+        /// Session handle (as a string).
+        session_id: String,
+        /// Barrier whose lock deactivated.
+        barrier_id: u32,
+    },
+}
 
 /// Thickness, in pixels, of a barrier's invisible hot-strip along the edge
 /// it's anchored to. The barrier itself is a zero-width line; the strip
@@ -172,6 +219,13 @@ pub struct BarrierSurface {
     /// Transparent SHM buffer attached once configured. `None` until the
     /// first `Configure` arrives (dimensions aren't known before then).
     pub shm_buffer: Option<ShmFrameBuffer>,
+    /// Live pointer lock, present while the pointer has entered this
+    /// surface and a lock has been requested (whether or not it has
+    /// activated yet -- see [`InputCaptureBarrierState::on_pointer_enter`]).
+    pub locked_pointer: Option<ZwpLockedPointerV1>,
+    /// Live relative-pointer object, present only once the lock has
+    /// actually activated (`Locked`).
+    pub relative_pointer: Option<ZwpRelativePointerV1>,
 }
 
 impl std::fmt::Debug for BarrierSurface {
@@ -201,6 +255,10 @@ pub struct InputCaptureBarrierState {
     pub shm: Option<WlShm>,
     /// Live barrier surfaces, keyed by `(session_id, barrier_id)`.
     pub surfaces: HashMap<(String, u32), BarrierSurface>,
+    /// Sender for activation-lifecycle events, consumed by the async
+    /// bridge task in `lib.rs`. `None` in configurations that don't wire
+    /// it up (locks are still requested, but nothing is ever reported).
+    pub activation_tx: Option<UnboundedSender<InputCaptureActivationEvent>>,
 }
 
 impl InputCaptureBarrierState {
@@ -282,6 +340,8 @@ impl InputCaptureBarrierState {
                     layer_surface,
                     configured: false,
                     shm_buffer: None,
+                    locked_pointer: None,
+                    relative_pointer: None,
                 },
             );
         }
@@ -352,11 +412,8 @@ impl InputCaptureBarrierState {
     /// Handle a `Closed` event: the compositor tore the surface down
     /// unexpectedly (e.g. its output was removed).
     pub fn on_closed(&mut self, session_id: &str, barrier_id: u32) {
-        if self
-            .surfaces
-            .remove(&(session_id.to_string(), barrier_id))
-            .is_some()
-        {
+        if let Some(mut surface) = self.surfaces.remove(&(session_id.to_string(), barrier_id)) {
+            destroy_lock_objects_mut(&mut surface);
             tracing::warn!(
                 session_id = %session_id,
                 barrier_id,
@@ -365,7 +422,7 @@ impl InputCaptureBarrierState {
         }
     }
 
-    /// Destroy every barrier surface for a session (`Disable`/`Release`/close).
+    /// Destroy every barrier surface for a session (`Disable`/close).
     pub fn destroy_session(&mut self, session_id: &str) {
         let keys: Vec<(String, u32)> = self
             .surfaces
@@ -375,13 +432,176 @@ impl InputCaptureBarrierState {
             .collect();
 
         for key in keys {
-            if let Some(surface) = self.surfaces.remove(&key) {
+            if let Some(mut surface) = self.surfaces.remove(&key) {
+                destroy_lock_objects_mut(&mut surface);
                 surface.layer_surface.destroy();
                 surface.wl_surface.destroy();
             }
         }
 
         tracing::debug!(session_id = %session_id, "InputCapture barrier surfaces destroyed");
+    }
+
+    /// Release only the currently-active lock/relative-pointer objects for
+    /// a session's barriers, leaving the barrier surfaces themselves
+    /// mapped so they can re-trigger later. Distinct from `destroy_session`
+    /// (`Disable`/close), which tears the surfaces down entirely --
+    /// `Release` per spec ends only the current activation.
+    pub fn release_active_locks(&mut self, session_id: &str) {
+        for surface in self.surfaces.values_mut() {
+            if surface.session_id == session_id {
+                destroy_lock_objects_mut(surface);
+            }
+        }
+    }
+
+    /// Find the barrier a `wl_pointer` `Enter`/`Leave` event landed on, by
+    /// `wl_surface` identity.
+    fn find_barrier_by_surface(&self, surface: &WlSurface) -> Option<(String, u32)> {
+        self.surfaces
+            .values()
+            .find(|s| s.wl_surface == *surface)
+            .map(|s| (s.session_id.clone(), s.barrier_id))
+    }
+
+    /// Handle `wl_pointer.Enter` on one of our barrier surfaces: request a
+    /// pointer lock. The lock may never activate -- the protocol gives no
+    /// guarantee -- [`Self::on_locked`] is what actually reports
+    /// `Activated`.
+    pub fn on_pointer_enter(
+        &mut self,
+        qh: &QueueHandle<WaylandState>,
+        pointer: &WlPointer,
+        surface: &WlSurface,
+    ) {
+        let Some((session_id, barrier_id)) = self.find_barrier_by_surface(surface) else {
+            return;
+        };
+        let Some(pointer_constraints) = &self.pointer_constraints else {
+            tracing::warn!(
+                session_id = %session_id,
+                barrier_id,
+                "Pointer entered a barrier surface but zwp_pointer_constraints_v1 is not bound"
+            );
+            return;
+        };
+        let Some(barrier_surface) = self.surfaces.get_mut(&(session_id.clone(), barrier_id)) else {
+            return;
+        };
+        if barrier_surface.locked_pointer.is_some() {
+            // Already locked or locking -- a stray re-Enter shouldn't request a second lock.
+            return;
+        }
+
+        let locked = pointer_constraints.lock_pointer(
+            &barrier_surface.wl_surface,
+            pointer,
+            None,
+            Lifetime::Oneshot,
+            qh,
+            (session_id.clone(), barrier_id),
+        );
+        barrier_surface.locked_pointer = Some(locked);
+        tracing::debug!(session_id = %session_id, barrier_id, "Pointer lock requested");
+    }
+
+    /// Handle `wl_pointer.Leave`: if a lock was requested but never
+    /// activated (the pointer grazed the barrier strip), cancel it so it
+    /// doesn't linger or spuriously activate on an unrelated re-entry.
+    pub fn on_pointer_leave(&mut self, surface: &WlSurface) {
+        let Some((session_id, barrier_id)) = self.find_barrier_by_surface(surface) else {
+            return;
+        };
+        let Some(barrier_surface) = self.surfaces.get_mut(&(session_id, barrier_id)) else {
+            return;
+        };
+        if barrier_surface.relative_pointer.is_none() {
+            if let Some(locked) = barrier_surface.locked_pointer.take() {
+                locked.destroy();
+            }
+        }
+    }
+
+    /// Handle `zwp_locked_pointer_v1.Locked`: the lock is now active. Get a
+    /// relative-pointer object and report `Activated`.
+    pub fn on_locked(
+        &mut self,
+        qh: &QueueHandle<WaylandState>,
+        pointer: &WlPointer,
+        session_id: &str,
+        barrier_id: u32,
+    ) {
+        let Some(relative_pointer_manager) = &self.relative_pointer_manager else {
+            tracing::warn!(
+                session_id = %session_id,
+                barrier_id,
+                "Pointer locked but zwp_relative_pointer_manager_v1 is not bound"
+            );
+            return;
+        };
+        let key = (session_id.to_string(), barrier_id);
+        let Some(barrier_surface) = self.surfaces.get_mut(&key) else {
+            return;
+        };
+
+        let relative_pointer =
+            relative_pointer_manager.get_relative_pointer(pointer, qh, key.clone());
+        barrier_surface.relative_pointer = Some(relative_pointer);
+
+        tracing::info!(session_id = %session_id, barrier_id, "InputCapture barrier activated");
+        self.send_activation_event(InputCaptureActivationEvent::Activated {
+            session_id: session_id.to_string(),
+            barrier_id,
+        });
+    }
+
+    /// Handle `zwp_locked_pointer_v1.Unlocked`: the lock is defunct
+    /// (oneshot) or was explicitly released. Tear down both protocol
+    /// objects and report `Deactivated`.
+    pub fn on_unlocked(&mut self, session_id: &str, barrier_id: u32) {
+        if let Some(barrier_surface) = self.surfaces.get_mut(&(session_id.to_string(), barrier_id))
+        {
+            destroy_lock_objects_mut(barrier_surface);
+        }
+
+        tracing::info!(session_id = %session_id, barrier_id, "InputCapture barrier deactivated");
+        self.send_activation_event(InputCaptureActivationEvent::Deactivated {
+            session_id: session_id.to_string(),
+            barrier_id,
+        });
+    }
+
+    /// Handle `zwp_relative_pointer_v1.RelativeMotion`: forward the sample.
+    pub fn on_relative_motion(&self, session_id: &str, dx: f64, dy: f64, time_usec: u64) {
+        self.send_activation_event(InputCaptureActivationEvent::Motion {
+            session_id: session_id.to_string(),
+            dx,
+            dy,
+            time_usec,
+        });
+    }
+
+    /// Send an activation-lifecycle event to the async bridge task, if one
+    /// is configured. `UnboundedSender::send` is non-blocking and safe to
+    /// call from this `!Send`, synchronous Wayland-thread dispatch context
+    /// -- the same mechanism `ClipboardSignal` uses from
+    /// `on_selection_changed`'s callback.
+    fn send_activation_event(&self, event: InputCaptureActivationEvent) {
+        if let Some(tx) = &self.activation_tx {
+            let _ = tx.send(event);
+        }
+    }
+}
+
+/// Destroy a barrier surface's live lock/relative-pointer objects, if any.
+/// Wayland protocol object hygiene only -- callers handle any
+/// D-Bus-visible deactivation separately.
+fn destroy_lock_objects_mut(surface: &mut BarrierSurface) {
+    if let Some(relative_pointer) = surface.relative_pointer.take() {
+        relative_pointer.destroy();
+    }
+    if let Some(locked) = surface.locked_pointer.take() {
+        locked.destroy();
     }
 }
 

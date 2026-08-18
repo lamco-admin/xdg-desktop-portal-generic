@@ -250,6 +250,12 @@ impl InputBackend for EisBridgeBackend {
         self.wlr.inject_event(session_id, event)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one sequential per-session loop -- health-signal harvesting, the \
+                  receiver-context forwarding guard, and disconnect cleanup are all facets of \
+                  the same event-draining pass, not separable concerns"
+    )]
     fn process_events(&mut self) -> Result<Vec<(String, InputEvent)>> {
         let mut all_events = Vec::new();
         let mut disconnected = Vec::new();
@@ -328,6 +334,19 @@ impl InputBackend for EisBridgeBackend {
                         }
 
                         if let Some(event) = Self::eis_request_to_input_event(request) {
+                            if session.is_receiver() {
+                                // A receiver-context session (InputCapture) is never
+                                // supposed to send content requests -- it's the one
+                                // receiving, not emulating. Log and drop rather than
+                                // forwarding a malformed/unexpected event to the
+                                // real compositor.
+                                tracing::warn!(
+                                    session_id = %session_id,
+                                    "Unexpected content event from receiver-context EIS session -- dropped"
+                                );
+                                continue;
+                            }
+
                             // Forward the event to the compositor via wlr
                             if let Err(e) = self.wlr.inject_event(session_id, event.clone()) {
                                 tracing::warn!(
@@ -385,6 +404,33 @@ impl InputBackend for EisBridgeBackend {
 
     fn set_stream_mappings(&mut self, mappings: Vec<StreamOutputMapping>) {
         self.wlr.set_stream_mappings(mappings);
+    }
+
+    fn start_input_capture(&mut self, session_id: &str) -> Result<()> {
+        self.sessions
+            .get_mut(session_id)
+            .ok_or_else(|| PortalError::SessionNotFound(session_id.to_string()))?
+            .start_emulating()
+    }
+
+    fn forward_captured_pointer_motion(
+        &mut self,
+        session_id: &str,
+        dx: f64,
+        dy: f64,
+        time_usec: u64,
+    ) -> Result<()> {
+        self.sessions
+            .get_mut(session_id)
+            .ok_or_else(|| PortalError::SessionNotFound(session_id.to_string()))?
+            .send_pointer_motion(dx, dy, time_usec)
+    }
+
+    fn stop_input_capture(&mut self, session_id: &str) -> Result<()> {
+        self.sessions
+            .get_mut(session_id)
+            .ok_or_else(|| PortalError::SessionNotFound(session_id.to_string()))?
+            .stop_emulating()
     }
 }
 
