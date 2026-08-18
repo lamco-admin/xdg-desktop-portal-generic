@@ -34,7 +34,7 @@ use data_control::DataControlManager;
 pub use data_control::{ClipboardCommand, SharedClipboardState};
 pub use dispatch::{OutputInfo, WaylandState};
 pub use globals::AvailableProtocols;
-pub use input_capture::{InputCaptureActivationEvent, InputCaptureBarrierState};
+pub use input_capture::{CachedKeymap, InputCaptureActivationEvent, InputCaptureBarrierState};
 use wayland_client::{
     Connection, EventQueue, QueueHandle,
     globals::{GlobalList, registry_queue_init},
@@ -164,6 +164,9 @@ pub enum InputCaptureCommand {
         session_id: String,
         /// Accepted barriers to create surfaces for.
         barriers: Vec<crate::types::PointerBarrier>,
+        /// Whether entering a barrier should also grab exclusive keyboard
+        /// focus (the session negotiated `KEYBOARD` capability).
+        grab_keyboard: bool,
     },
     /// Destroy all barrier surfaces for a session (Disable/close).
     DestroySession {
@@ -230,6 +233,17 @@ pub struct SharedWaylandState {
     /// changes. Per spec, applications must be able to handle this ID
     /// wrapping around.
     pub zone_set: u32,
+    /// Compositor keymap, moved here once from
+    /// `InputCaptureBarrierState::pending_keymap` the first time it's
+    /// available. Read by `EisSession::transition_to_active` when setting
+    /// up a receiver-context device with keyboard capability.
+    pub keyboard_keymap: Option<CachedKeymap>,
+    /// Live cursor position for whichever InputCapture session currently
+    /// holds the single active pointer lock (session_id, x, y), refreshed
+    /// every dispatch cycle. `None` the instant nothing is locked. Read by
+    /// `Release()`/`Disable()`'s D-Bus handlers, which run synchronously
+    /// and have no other access to Wayland-thread state.
+    pub active_capture_cursor: Option<(String, f64, f64)>,
 }
 
 impl WaylandConnection {
@@ -273,6 +287,8 @@ impl WaylandConnection {
             sources: state.get_sources(),
             zones: state.get_input_capture_zones(),
             zone_set: 0,
+            keyboard_keymap: None,
+            active_capture_cursor: None,
         }));
 
         tracing::info!("Wayland connection established");
@@ -666,7 +682,7 @@ impl WaylandConnection {
     }
 
     /// Update the shared state from the local state.
-    fn update_shared_state(&self) {
+    fn update_shared_state(&mut self) {
         if let Ok(mut shared) = self.shared_state.lock() {
             shared.sources = self.state.get_sources();
 
@@ -677,6 +693,26 @@ impl WaylandConnection {
                 shared.zone_set = shared.zone_set.wrapping_add(1);
                 shared.zones = new_zones;
             }
+
+            if shared.keyboard_keymap.is_none() {
+                if let Some(keymap) = self.state.input_capture.pending_keymap.take() {
+                    shared.keyboard_keymap = Some(keymap);
+                }
+            }
+
+            // Single-active-lock invariant: a locked wl_pointer stops
+            // emitting motion, so at most one barrier surface across the
+            // whole process can have a live relative_pointer at once.
+            shared.active_capture_cursor = self
+                .state
+                .input_capture
+                .surfaces
+                .values()
+                .find(|s| s.relative_pointer.is_some())
+                .and_then(|s| {
+                    s.last_cursor_position
+                        .map(|(x, y)| (s.session_id.clone(), x, y))
+                });
         }
     }
 
@@ -942,6 +978,7 @@ impl WaylandConnection {
                 InputCaptureCommand::CreateBarrierSurfaces {
                     session_id,
                     barriers,
+                    grab_keyboard,
                 } => {
                     let zones = self.state.get_input_capture_zones_with_output();
                     let outputs = self.state.outputs.clone();
@@ -957,6 +994,7 @@ impl WaylandConnection {
                         &barriers,
                         &zones,
                         find_output,
+                        grab_keyboard,
                     );
                 }
                 InputCaptureCommand::DestroySession { session_id } => {

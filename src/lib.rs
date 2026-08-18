@@ -703,6 +703,7 @@ impl PortalBackend {
                 InputCaptureActivationEvent::Activated {
                     session_id,
                     barrier_id,
+                    cursor_position,
                 } => {
                     Self::handle_input_capture_activated(
                         &connection,
@@ -710,6 +711,7 @@ impl PortalBackend {
                         &input_backend,
                         session_id,
                         barrier_id,
+                        cursor_position,
                     )
                     .await;
                 }
@@ -730,9 +732,49 @@ impl PortalBackend {
                         );
                     }
                 }
+                InputCaptureActivationEvent::Key {
+                    session_id,
+                    keycode,
+                    pressed,
+                    time_usec,
+                } => {
+                    let mut backend = input_backend.lock().await;
+                    if let Err(e) =
+                        backend.forward_captured_key(&session_id, keycode, pressed, time_usec)
+                    {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            error = %e,
+                            "Failed to forward captured key event"
+                        );
+                    }
+                }
+                InputCaptureActivationEvent::Modifiers {
+                    session_id,
+                    depressed,
+                    latched,
+                    locked,
+                    group,
+                } => {
+                    let mut backend = input_backend.lock().await;
+                    if let Err(e) = backend.forward_captured_modifiers(
+                        &session_id,
+                        depressed,
+                        latched,
+                        locked,
+                        group,
+                    ) {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            error = %e,
+                            "Failed to forward captured modifiers"
+                        );
+                    }
+                }
                 InputCaptureActivationEvent::Deactivated {
                     session_id,
                     barrier_id,
+                    cursor_position,
                 } => {
                     Self::handle_input_capture_deactivated(
                         &connection,
@@ -740,6 +782,7 @@ impl PortalBackend {
                         &input_backend,
                         session_id,
                         barrier_id,
+                        cursor_position,
                     )
                     .await;
                 }
@@ -760,6 +803,7 @@ impl PortalBackend {
         input_backend: &Arc<Mutex<Box<dyn InputBackend>>>,
         session_id: String,
         barrier_id: u32,
+        cursor_position: Option<(f64, f64)>,
     ) {
         let Ok(handle) = zbus::zvariant::ObjectPath::try_from(session_id.as_str()) else {
             tracing::warn!(
@@ -808,7 +852,7 @@ impl PortalBackend {
             if let Err(e) = dbus::InputCaptureInterface::emit_activated(
                 ctx,
                 handle,
-                dbus::activated_options(activation_id, barrier_id),
+                dbus::activated_options(activation_id, barrier_id, cursor_position),
             )
             .await
             {
@@ -833,6 +877,7 @@ impl PortalBackend {
         input_backend: &Arc<Mutex<Box<dyn InputBackend>>>,
         session_id: String,
         barrier_id: u32,
+        cursor_position: Option<(f64, f64)>,
     ) {
         let Ok(handle) = zbus::zvariant::ObjectPath::try_from(session_id.as_str()) else {
             tracing::warn!(
@@ -869,7 +914,7 @@ impl PortalBackend {
             if let Err(e) = dbus::InputCaptureInterface::emit_deactivated(
                 ctx,
                 handle,
-                dbus::deactivated_options(activation_id),
+                dbus::deactivated_options(activation_id, cursor_position),
             )
             .await
             {

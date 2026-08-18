@@ -79,7 +79,8 @@ async fn main() -> Result<()> {
 
     // Create backends based on detected protocols
     let input_config = InputBackendConfig::from_env();
-    let input_backend = create_input_backend(&input_config, &protocols)?;
+    let mut input_backend = create_input_backend(&input_config, &protocols)?;
+    input_backend.set_shared_wayland_state(shared_wayland_state.clone());
 
     // Clone capture_tx before passing to backend — Screenshot needs its own sender
     let screenshot_capture_tx = capture_tx.clone();

@@ -10,9 +10,9 @@ use wayland_client::{
     Connection, Dispatch, QueueHandle,
     globals::GlobalListContents,
     protocol::{
-        wl_buffer::WlBuffer, wl_compositor::WlCompositor, wl_output::WlOutput,
-        wl_pointer::WlPointer, wl_registry::WlRegistry, wl_seat::WlSeat, wl_shm::WlShm,
-        wl_shm_pool::WlShmPool, wl_surface::WlSurface,
+        wl_buffer::WlBuffer, wl_compositor::WlCompositor, wl_keyboard::WlKeyboard,
+        wl_output::WlOutput, wl_pointer::WlPointer, wl_registry::WlRegistry, wl_seat::WlSeat,
+        wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_surface::WlSurface,
     },
 };
 use wayland_protocols::{
@@ -70,8 +70,10 @@ use wayland_protocols_wlr::{
 };
 
 use super::{
-    data_control::DataControlState, ext_capture::ExtCaptureState,
-    input_capture::InputCaptureBarrierState, screencopy::ScreencopyState,
+    data_control::DataControlState,
+    ext_capture::ExtCaptureState,
+    input_capture::{CachedKeymap, InputCaptureBarrierState},
+    screencopy::ScreencopyState,
 };
 use crate::types::{InputCaptureZone, SourceInfo};
 
@@ -139,6 +141,10 @@ pub struct WaylandState {
     /// Pointer object, bound from the seat once it advertises the Pointer
     /// capability. Used for InputCapture barrier locking (Phase 2b).
     pub pointer: Option<WlPointer>,
+    /// Keyboard object, bound from the seat once it advertises the
+    /// Keyboard capability. Used for InputCapture keyboard capture
+    /// (Phase 2c).
+    pub keyboard: Option<WlKeyboard>,
     /// Known outputs with their info.
     pub outputs: Vec<(WlOutput, Arc<Mutex<OutputInfo>>)>,
 
@@ -310,6 +316,10 @@ impl Dispatch<WlSeat, ()> for WaylandState {
                         state.pointer = Some(proxy.get_pointer(qh, ()));
                         tracing::debug!("Bound wl_pointer from seat capabilities");
                     }
+                    if caps.contains(Capability::Keyboard) && state.keyboard.is_none() {
+                        state.keyboard = Some(proxy.get_keyboard(qh, ()));
+                        tracing::debug!("Bound wl_keyboard from seat capabilities");
+                    }
                 }
                 tracing::debug!("Seat capabilities: {:?}", capabilities);
             }
@@ -332,11 +342,18 @@ impl Dispatch<WlPointer, ()> for WaylandState {
     ) {
         use wayland_client::protocol::wl_pointer::Event;
         match event {
-            Event::Enter { surface, .. } => {
+            Event::Enter {
+                surface,
+                surface_x,
+                surface_y,
+                ..
+            } => {
                 let Some(pointer) = state.pointer.clone() else {
                     return;
                 };
-                state.input_capture.on_pointer_enter(qh, &pointer, &surface);
+                state
+                    .input_capture
+                    .on_pointer_enter(qh, &pointer, &surface, surface_x, surface_y);
             }
             Event::Leave { surface, .. } => {
                 state.input_capture.on_pointer_leave(&surface);
@@ -377,7 +394,7 @@ impl Dispatch<ZwpRelativePointerV1, (String, u32)> for WaylandState {
         state: &mut Self,
         _proxy: &ZwpRelativePointerV1,
         event: <ZwpRelativePointerV1 as wayland_client::Proxy>::Event,
-        (session_id, _barrier_id): &(String, u32),
+        (session_id, barrier_id): &(String, u32),
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
@@ -392,7 +409,67 @@ impl Dispatch<ZwpRelativePointerV1, (String, u32)> for WaylandState {
             let time_usec = (u64::from(utime_hi) << 32) | u64::from(utime_lo);
             state
                 .input_capture
-                .on_relative_motion(session_id, dx, dy, time_usec);
+                .on_relative_motion(session_id, *barrier_id, dx, dy, time_usec);
+        }
+    }
+}
+
+impl Dispatch<WlKeyboard, ()> for WaylandState {
+    fn event(
+        state: &mut Self,
+        _proxy: &WlKeyboard,
+        event: <WlKeyboard as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        use wayland_client::protocol::wl_keyboard::{Event, KeymapFormat};
+        match event {
+            Event::Keymap { format, fd, size } => {
+                if let wayland_client::WEnum::Value(KeymapFormat::XkbV1) = format {
+                    state.input_capture.pending_keymap = Some(CachedKeymap { fd, size });
+                    tracing::debug!("Cached compositor keymap for InputCapture keyboard delivery");
+                } else {
+                    tracing::warn!(
+                        ?format,
+                        "Compositor keymap is not xkb_v1 -- InputCapture keyboard capture will \
+                         run without a keymap"
+                    );
+                }
+            }
+            Event::Enter { surface, .. } => {
+                state.input_capture.on_keyboard_enter(&surface);
+            }
+            Event::Leave { .. } => {
+                state.input_capture.on_keyboard_leave();
+            }
+            Event::Key {
+                time,
+                key,
+                state: wayland_client::WEnum::Value(key_state),
+                ..
+            } => {
+                use wayland_client::protocol::wl_keyboard::KeyState;
+                let pressed = key_state != KeyState::Released;
+                state
+                    .input_capture
+                    .on_keyboard_key(key, pressed, u64::from(time) * 1000);
+            }
+            Event::Modifiers {
+                mods_depressed,
+                mods_latched,
+                mods_locked,
+                group,
+                ..
+            } => {
+                state.input_capture.on_keyboard_modifiers(
+                    mods_depressed,
+                    mods_latched,
+                    mods_locked,
+                    group,
+                );
+            }
+            _ => {}
         }
     }
 }

@@ -29,7 +29,7 @@ mod eis_bridge;
 pub mod uinput_backend;
 mod wlr_backend;
 
-use std::{os::unix::io::OwnedFd, path::PathBuf};
+use std::{os::unix::io::OwnedFd, path::PathBuf, sync::Arc};
 
 pub use detection::{AvailableProtocols, ProtocolDetector};
 pub use eis_backend::EisSession;
@@ -206,6 +206,51 @@ pub trait InputBackend: Send + Sync {
             expected: "EIS backend with an active receiver-context session".to_string(),
             actual: "this backend has no InputCapture activation support".to_string(),
         })
+    }
+
+    /// Forward one key press/release to the EIS client for `session_id`
+    /// while capture is active. Same default-error rationale as
+    /// [`Self::start_input_capture`].
+    fn forward_captured_key(
+        &mut self,
+        session_id: &str,
+        keycode: u32,
+        pressed: bool,
+        time_usec: u64,
+    ) -> Result<()> {
+        let _ = (session_id, keycode, pressed, time_usec);
+        Err(PortalError::InvalidState {
+            expected: "EIS backend with an active receiver-context session".to_string(),
+            actual: "this backend has no InputCapture activation support".to_string(),
+        })
+    }
+
+    /// Forward a modifier/group state change to the EIS client for
+    /// `session_id` while capture is active. Same default-error rationale
+    /// as [`Self::start_input_capture`].
+    fn forward_captured_modifiers(
+        &mut self,
+        session_id: &str,
+        depressed: u32,
+        latched: u32,
+        locked: u32,
+        group: u32,
+    ) -> Result<()> {
+        let _ = (session_id, depressed, latched, locked, group);
+        Err(PortalError::InvalidState {
+            expected: "EIS backend with an active receiver-context session".to_string(),
+            actual: "this backend has no InputCapture activation support".to_string(),
+        })
+    }
+
+    /// Set the shared Wayland state, used to read the cached compositor
+    /// keymap for `InputCapture` keyboard capability. Default no-op for
+    /// backends that don't need it.
+    fn set_shared_wayland_state(
+        &mut self,
+        _state: Arc<std::sync::Mutex<crate::wayland::SharedWaylandState>>,
+    ) {
+        // Default no-op for backends that don't do keyboard capture
     }
 }
 

@@ -28,11 +28,17 @@
 //! barriers armed to re-trigger (distinct from `Disable()`, which tears
 //! down the barrier surfaces entirely).
 //!
-//! **Still not implemented:** no keyboard interface is grabbed for a
-//! captured session (`Start()` logs a `tracing::warn!` the first time a
-//! client requests `KEYBOARD` capability, so this gap is visible in logs
-//! rather than silent), and `cursor_position` (spec-optional on
-//! `Activated`/`Deactivated`/`Release`) is never computed.
+//! # Phase 2c scope
+//!
+//! `Enable()` also grabs real keyboard focus while a lock is active (a
+//! captured session with negotiated `KEYBOARD` capability actually
+//! receives key/modifier events now, forwarded over the same EIS receiver
+//! connection as pointer motion). `Activated`/`Deactivated`/`Release`'s
+//! `options` now include `cursor_position` when a live position is known.
+//!
+//! **Still not implemented:** `cursor_position` is best-effort -- it's
+//! `None` if the shared Wayland state was never wired up, or if nothing
+//! is currently locked by the time `Release()`/`Disable()` reads it.
 
 use std::{
     collections::HashMap,
@@ -253,6 +259,18 @@ impl InputCaptureInterface {
             return (Vec::new(), 0);
         };
         (state.zones.clone(), state.zone_set)
+    }
+
+    /// Read the live cursor position for `session_id`, if it currently
+    /// holds the single active pointer lock. `None` covers every
+    /// degradation case (no shared state configured, poisoned lock, no
+    /// session currently locked, or a different session is locked) --
+    /// `cursor_position` is spec-optional, so this never fails the caller.
+    fn current_cursor_position(&self, session_id: &str) -> Option<(f64, f64)> {
+        let shared = self.shared_wayland_state.as_ref()?;
+        let state = shared.lock().ok()?;
+        let (sid, x, y) = state.active_capture_cursor.as_ref()?;
+        (sid == session_id).then_some((*x, *y))
     }
 
     /// Build the `a(uuii)` zones result plus `zone_set`.
@@ -509,14 +527,6 @@ impl InputCaptureInterface {
         let clipboard_enabled = session.clipboard_enabled;
         let persist_mode = session.persist_mode;
 
-        if negotiated.keyboard {
-            tracing::warn!(
-                session_id = %session_handle,
-                "InputCapture keyboard capability negotiated, but no keyboard interface is \
-                 grabbed for captured sessions yet -- only pointer input is delivered"
-            );
-        }
-
         let mut results = HashMap::new();
         results.insert(
             "capabilities".to_string(),
@@ -691,6 +701,7 @@ impl InputCaptureInterface {
             .ok_or_else(|| PortalError::SessionNotFound(session_handle.to_string()))?;
         session.set_input_capture_enabled(true)?;
         let barriers = session.input_capture_barriers.clone();
+        let grab_keyboard = session.device_types.keyboard;
         drop(manager);
 
         if !barriers.is_empty() {
@@ -698,6 +709,7 @@ impl InputCaptureInterface {
                 let _ = tx.send(InputCaptureCommand::CreateBarrierSurfaces {
                     session_id: session_handle.to_string(),
                     barriers,
+                    grab_keyboard,
                 });
             } else {
                 tracing::warn!(
@@ -744,6 +756,8 @@ impl InputCaptureInterface {
         session.set_input_capture_enabled(false)?;
         drop(manager);
 
+        let cursor_position = self.current_cursor_position(&session_handle.to_string());
+
         if let Some(tx) = &self.input_capture_tx {
             let _ = tx.send(InputCaptureCommand::DestroySession {
                 session_id: session_handle.to_string(),
@@ -754,7 +768,7 @@ impl InputCaptureInterface {
             let _ = Self::deactivated(
                 &emitter,
                 session_handle.to_owned(),
-                deactivated_options(activation_id),
+                deactivated_options(activation_id, cursor_position),
             )
             .await;
         }
@@ -802,6 +816,8 @@ impl InputCaptureInterface {
         let activation_id = session.end_input_capture_activation();
         drop(manager);
 
+        let cursor_position = self.current_cursor_position(&session_handle.to_string());
+
         if let Some(tx) = &self.input_capture_tx {
             let _ = tx.send(InputCaptureCommand::ReleaseActiveLock {
                 session_id: session_handle.to_string(),
@@ -812,7 +828,7 @@ impl InputCaptureInterface {
             let _ = Self::deactivated(
                 &emitter,
                 session_handle.to_owned(),
-                deactivated_options(activation_id),
+                deactivated_options(activation_id, cursor_position),
             )
             .await;
         }
@@ -995,23 +1011,41 @@ pub async fn emit_zones_changed(
     InputCaptureInterface::zones_changed(signal_emitter, session_handle, empty_results()).await
 }
 
+/// Insert `cursor_position` (`dd`) into an options map, if known.
+fn insert_cursor_position(
+    options: &mut HashMap<String, OwnedValue>,
+    cursor_position: Option<(f64, f64)>,
+) {
+    let Some((x, y)) = cursor_position else {
+        return;
+    };
+    if let Ok(value) = OwnedValue::try_from(Value::from((x, y))) {
+        options.insert("cursor_position".to_string(), value);
+    }
+}
+
 /// Build the `options` map for an `Activated` signal.
-///
-/// `cursor_position` is spec-optional and deliberately omitted -- resolving
-/// a barrier-surface-local coordinate into compositor-global space needs
-/// its own review, not attempted here.
-pub fn activated_options(activation_id: u32, barrier_id: u32) -> HashMap<String, OwnedValue> {
+pub fn activated_options(
+    activation_id: u32,
+    barrier_id: u32,
+    cursor_position: Option<(f64, f64)>,
+) -> HashMap<String, OwnedValue> {
     let mut options = HashMap::new();
     options.insert("activation_id".to_string(), OwnedValue::from(activation_id));
     options.insert("barrier_id".to_string(), OwnedValue::from(barrier_id));
+    insert_cursor_position(&mut options, cursor_position);
     options
 }
 
 /// Build the `options` map for a `Deactivated` signal (echoes the same
 /// `activation_id` from the corresponding `Activated`).
-pub fn deactivated_options(activation_id: u32) -> HashMap<String, OwnedValue> {
+pub fn deactivated_options(
+    activation_id: u32,
+    cursor_position: Option<(f64, f64)>,
+) -> HashMap<String, OwnedValue> {
     let mut options = HashMap::new();
     options.insert("activation_id".to_string(), OwnedValue::from(activation_id));
+    insert_cursor_position(&mut options, cursor_position);
     options
 }
 

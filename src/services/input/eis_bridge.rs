@@ -24,7 +24,7 @@
 //! When Smithay PR #1388 lands, Smithay-based compositors will accept EIS natively,
 //! and this bridge won't be needed for those compositors.
 
-use std::{collections::HashMap, os::unix::io::OwnedFd};
+use std::{collections::HashMap, os::unix::io::OwnedFd, sync::Arc};
 
 use reis::request::EisRequest;
 
@@ -51,6 +51,9 @@ pub struct EisBridgeBackend {
     wlr: WlrInputBackend,
     /// Health event sender for input metrics.
     health_tx: Option<crate::health::HealthSender>,
+    /// Shared Wayland state, used to read the cached compositor keymap for
+    /// new receiver-context sessions with keyboard capability.
+    shared_wayland_state: Option<Arc<std::sync::Mutex<crate::wayland::SharedWaylandState>>>,
 }
 
 impl EisBridgeBackend {
@@ -67,6 +70,7 @@ impl EisBridgeBackend {
             sessions: HashMap::new(),
             wlr,
             health_tx: None,
+            shared_wayland_state: None,
         })
     }
 
@@ -217,7 +221,7 @@ impl InputBackend for EisBridgeBackend {
         }
 
         // Create the EIS session (server-side socket + handshake)
-        let (eis_session, client_fd) = EisSession::new(devices)?;
+        let (eis_session, client_fd) = EisSession::new(devices, self.shared_wayland_state.clone())?;
 
         // Create wlr virtual devices for forwarding
         self.wlr.create_context(session_id, devices)?;
@@ -431,6 +435,40 @@ impl InputBackend for EisBridgeBackend {
             .get_mut(session_id)
             .ok_or_else(|| PortalError::SessionNotFound(session_id.to_string()))?
             .stop_emulating()
+    }
+
+    fn forward_captured_key(
+        &mut self,
+        session_id: &str,
+        keycode: u32,
+        pressed: bool,
+        time_usec: u64,
+    ) -> Result<()> {
+        self.sessions
+            .get_mut(session_id)
+            .ok_or_else(|| PortalError::SessionNotFound(session_id.to_string()))?
+            .send_key(keycode, pressed, time_usec)
+    }
+
+    fn forward_captured_modifiers(
+        &mut self,
+        session_id: &str,
+        depressed: u32,
+        latched: u32,
+        locked: u32,
+        group: u32,
+    ) -> Result<()> {
+        self.sessions
+            .get_mut(session_id)
+            .ok_or_else(|| PortalError::SessionNotFound(session_id.to_string()))?
+            .send_modifiers(depressed, latched, locked, group)
+    }
+
+    fn set_shared_wayland_state(
+        &mut self,
+        state: Arc<std::sync::Mutex<crate::wayland::SharedWaylandState>>,
+    ) {
+        self.shared_wayland_state = Some(state);
     }
 }
 

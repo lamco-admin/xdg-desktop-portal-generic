@@ -21,9 +21,12 @@
 //! management. Used by [`super::eis_bridge::EisBridgeBackend`] for forwarding
 //! events to wlr virtual input protocols.
 
-use std::os::unix::{
-    io::{AsRawFd, FromRawFd, OwnedFd},
-    net::UnixStream,
+use std::{
+    os::unix::{
+        io::{AsFd, AsRawFd, FromRawFd, OwnedFd},
+        net::UnixStream,
+    },
+    sync::Arc,
 };
 
 use enumflags2::BitFlags;
@@ -52,6 +55,11 @@ pub struct EisSession {
     /// (`ActiveReceiver` phase only; a session may activate/deactivate/
     /// reactivate across multiple barrier crossings during its lifetime).
     next_sequence: u32,
+    /// Shared Wayland state, read once (lazily, at handshake completion --
+    /// the keymap may not have arrived yet at session-creation time) to
+    /// forward the cached compositor keymap into a receiver-context
+    /// keyboard device.
+    shared_wayland_state: Option<Arc<std::sync::Mutex<crate::wayland::SharedWaylandState>>>,
 }
 
 enum SessionPhase {
@@ -92,7 +100,10 @@ impl EisSession {
     ///
     /// The caller should pass the returned `OwnedFd` to the client via D-Bus
     /// (the `ConnectToEIS` method).
-    pub fn new(device_types: DeviceTypes) -> Result<(Self, OwnedFd)> {
+    pub fn new(
+        device_types: DeviceTypes,
+        shared_wayland_state: Option<Arc<std::sync::Mutex<crate::wayland::SharedWaylandState>>>,
+    ) -> Result<(Self, OwnedFd)> {
         let (server_socket, client_socket) = UnixStream::pair().map_err(|e| {
             PortalError::EisCreationFailed(format!("Failed to create socket pair: {e}"))
         })?;
@@ -119,6 +130,7 @@ impl EisSession {
                 capabilities,
             },
             next_sequence: 0,
+            shared_wayland_state,
         };
 
         Ok((session, client_fd))
@@ -233,15 +245,43 @@ impl EisSession {
         // Add a seat with the requested capabilities
         let seat = connection.add_seat(Some("portal-input"), capabilities);
 
-        // Add a device on the seat with all requested capabilities
+        // Add a device on the seat with all requested capabilities. If
+        // this is a receiver-context device with keyboard capability, try
+        // to forward the cached compositor keymap -- required before
+        // ei_device.done, so it must happen here, not later. Missing a
+        // keymap degrades gracefully (the client just gets raw keycodes
+        // with no defined interpretation), it never fails the handshake.
+        let shared_wayland_state = self.shared_wayland_state.clone();
         let device = seat.add_device(
             Some("portal-device"),
             eis::device::DeviceType::Virtual,
             capabilities,
-            |_device| {
-                // Could set keymap here for keyboard devices via
-                // device.device().keyboard().keymap(...) if needed.
-                // For now, the client handles its own keymap.
+            move |device| {
+                if !capabilities.contains(DeviceCapability::Keyboard) {
+                    return;
+                }
+                let Some(keyboard) = device.interface::<eis::Keyboard>() else {
+                    return;
+                };
+                let Some(shared) = shared_wayland_state.as_ref().and_then(|s| s.lock().ok()) else {
+                    tracing::warn!(
+                        "No shared Wayland state configured; InputCapture keyboard capture will \
+                         run without a keymap"
+                    );
+                    return;
+                };
+                let Some(keymap) = &shared.keyboard_keymap else {
+                    tracing::warn!(
+                        "No compositor keymap cached yet; InputCapture keyboard capture will \
+                         run without a keymap"
+                    );
+                    return;
+                };
+                keyboard.keymap(
+                    eis::keyboard::KeymapType::Xkb,
+                    keymap.size,
+                    keymap.fd.as_fd(),
+                );
             },
         );
 
@@ -389,6 +429,81 @@ impl EisSession {
         let _ = self.context.flush();
         Ok(())
     }
+
+    /// Send one key press/release to the client.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PortalError::InvalidState` if the session isn't an active
+    /// Receiver-context session, or the device has no keyboard interface
+    /// (the client didn't request keyboard capability).
+    pub fn send_key(&mut self, keycode: u32, pressed: bool, time_usec: u64) -> Result<()> {
+        let SessionPhase::ActiveReceiver { device, .. } = &self.phase else {
+            return Err(PortalError::InvalidState {
+                expected: "receiver-context EIS session, active".to_string(),
+                actual: "session not in an active receiver phase".to_string(),
+            });
+        };
+        let Some(keyboard) = device.interface::<eis::Keyboard>() else {
+            return Err(PortalError::InvalidState {
+                expected: "device with keyboard capability bound".to_string(),
+                actual: "device has no ei_keyboard interface".to_string(),
+            });
+        };
+        let state = if pressed {
+            eis::keyboard::KeyState::Press
+        } else {
+            eis::keyboard::KeyState::Released
+        };
+        keyboard.key(keycode, state);
+        // Unlike modifiers, ei_keyboard.key events are grouped into a
+        // logical hardware event like pointer/button samples.
+        device.frame(time_usec);
+        let _ = self.context.flush();
+        Ok(())
+    }
+
+    /// Send a modifier/group state change to the client.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PortalError::InvalidState` if the session isn't an active
+    /// Receiver-context session, or the device has no keyboard interface.
+    pub fn send_modifiers(
+        &mut self,
+        depressed: u32,
+        latched: u32,
+        locked: u32,
+        group: u32,
+    ) -> Result<()> {
+        let SessionPhase::ActiveReceiver {
+            device, converter, ..
+        } = &self.phase
+        else {
+            return Err(PortalError::InvalidState {
+                expected: "receiver-context EIS session, active".to_string(),
+                actual: "session not in an active receiver phase".to_string(),
+            });
+        };
+        let Some(keyboard) = device.interface::<eis::Keyboard>() else {
+            return Err(PortalError::InvalidState {
+                expected: "device with keyboard capability bound".to_string(),
+                actual: "device has no ei_keyboard interface".to_string(),
+            });
+        };
+        // wl_keyboard's field order is (depressed, latched, locked, group);
+        // ei_keyboard.modifiers's is (depressed, locked, latched, group) --
+        // latched/locked are swapped between the two protocols. Named
+        // explicitly here, not passed through positionally, so a future
+        // refactor can't silently reintroduce the swap.
+        converter.handle().with_next_serial(|serial| {
+            keyboard.modifiers(serial, depressed, locked, latched, group);
+        });
+        // No device.frame() here -- ei_keyboard.modifiers explicitly does
+        // not require one and should be processed immediately.
+        let _ = self.context.flush();
+        Ok(())
+    }
 }
 
 /// Convert our `DeviceTypes` to reis `DeviceCapability` bitflags.
@@ -440,7 +555,7 @@ mod tests {
 
     #[test]
     fn test_eis_session_creation() {
-        let (session, fd) = EisSession::new(DeviceTypes::all()).unwrap();
+        let (session, fd) = EisSession::new(DeviceTypes::all(), None).unwrap();
         assert!(!session.is_active());
         // fd should be valid
         assert!(fd.as_raw_fd() >= 0);
@@ -448,16 +563,18 @@ mod tests {
 
     #[test]
     fn test_eis_session_new_is_not_receiver() {
-        let (session, _fd) = EisSession::new(DeviceTypes::all()).unwrap();
+        let (session, _fd) = EisSession::new(DeviceTypes::all(), None).unwrap();
         assert!(!session.is_receiver());
     }
 
     #[test]
     fn test_receiver_methods_error_before_handshake_completes() {
-        let (mut session, _fd) = EisSession::new(DeviceTypes::all()).unwrap();
+        let (mut session, _fd) = EisSession::new(DeviceTypes::all(), None).unwrap();
 
         assert!(session.start_emulating().is_err());
         assert!(session.stop_emulating().is_err());
         assert!(session.send_pointer_motion(1.0, 2.0, 0).is_err());
+        assert!(session.send_key(30, true, 0).is_err());
+        assert!(session.send_modifiers(0, 0, 0, 0).is_err());
     }
 }
