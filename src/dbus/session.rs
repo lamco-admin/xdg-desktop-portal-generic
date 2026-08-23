@@ -147,6 +147,10 @@ impl SessionInterface {
 
     /// Interface version.
     #[zbus(property, name = "version")]
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "zbus::interface requires literal `async fn`; `-> impl Future` is rejected by the macro"
+    )]
     async fn version(&self) -> u32 {
         1
     }

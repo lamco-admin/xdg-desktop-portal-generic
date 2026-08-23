@@ -214,6 +214,10 @@ impl SettingsInterface {
     /// Returns the value for the given namespace and key, or an error if
     /// the setting is not known.
     #[zbus(name = "Read")]
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "zbus interface requires async"
+    )]
     async fn read(&self, namespace: &str, key: &str) -> zbus::fdo::Result<OwnedValue> {
         tracing::debug!(namespace = namespace, key = key, "Settings.Read called");
 
@@ -236,6 +240,10 @@ impl SettingsInterface {
     /// returns all known settings. Namespace patterns are matched at
     /// dot boundaries per the spec.
     #[zbus(name = "ReadAll")]
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "zbus interface requires async"
+    )]
     async fn read_all(
         &self,
         namespaces: Vec<&str>,
@@ -277,6 +285,10 @@ impl SettingsInterface {
 
     /// Interface version.
     #[zbus(property, name = "version")]
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "zbus interface requires async"
+    )]
     async fn version(&self) -> u32 {
         2
     }

@@ -987,6 +987,7 @@ impl InputCaptureInterface {
     /// Interface version.
     #[expect(
         clippy::unused_async,
+        clippy::unused_async_trait_impl,
         reason = "zbus requires async for property methods"
     )]
     #[zbus(property, name = "version")]

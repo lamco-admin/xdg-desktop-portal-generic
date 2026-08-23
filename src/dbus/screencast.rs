@@ -503,7 +503,11 @@ impl ScreenCastInterface {
 
     /// Interface version.
     #[zbus(property, name = "version")]
-    #[expect(clippy::unused_async, reason = "zbus interface requires async")]
+    #[expect(
+        clippy::unused_async,
+        clippy::unused_async_trait_impl,
+        reason = "zbus interface requires async"
+    )]
     async fn version(&self) -> u32 {
         6
     }
