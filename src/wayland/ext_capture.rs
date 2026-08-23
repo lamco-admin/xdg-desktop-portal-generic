@@ -149,6 +149,10 @@ pub struct ActiveExtCapture {
     pub timeout_reported: bool,
     /// When the current frame capture was initiated (for latency measurement).
     pub capture_started: Option<Instant>,
+    /// Earliest instant at which the next frame capture is allowed. Set to
+    /// "now" on every issued request; consulted by
+    /// `request_next_frame`/`pump_paced_requests` to pace the capture loop.
+    next_request_due: Instant,
 }
 
 /// Central ext-image-copy-capture state, stored in WaylandState.
@@ -180,9 +184,21 @@ pub struct ExtCaptureState {
     pub frames_sent_to_channel: u64,
     /// Health event sender for capture metrics.
     pub health_tx: Option<crate::health::HealthSender>,
+    /// Minimum wall-clock interval between successive frame captures.
+    /// Zero (the default) disables pacing entirely. See
+    /// `ScreencopyState::min_frame_interval` for the full rationale — the
+    /// same unpaced-request waste applies here; ext-image-copy-capture
+    /// compositors have simply not been observed to trigger it yet.
+    min_frame_interval: Duration,
 }
 
 impl ExtCaptureState {
+    /// Set the minimum interval between capture requests. Zero disables
+    /// pacing (default). Call before the event loop starts processing
+    /// frames for this to take effect from the first paced request.
+    pub fn set_min_frame_interval(&mut self, interval: Duration) {
+        self.min_frame_interval = interval;
+    }
     /// Start capturing an output via the ext protocol.
     ///
     /// Creates a source from the output, then a session from the source.
@@ -249,6 +265,7 @@ impl ExtCaptureState {
             created_at: Instant::now(),
             timeout_reported: false,
             capture_started: None,
+            next_request_due: Instant::now() + self.min_frame_interval,
         };
 
         self.captures.insert(node_id, capture);
@@ -298,6 +315,7 @@ impl ExtCaptureState {
             created_at: Instant::now(),
             timeout_reported: false,
             capture_started: None,
+            next_request_due: Instant::now(),
         };
 
         self.captures.insert(screenshot_id, capture);
@@ -644,8 +662,30 @@ impl ExtCaptureState {
         timed_out
     }
 
-    /// Request the next frame in the capture loop.
+    /// Request the next frame in the capture loop, subject to pacing.
+    ///
+    /// If `min_frame_interval` hasn't elapsed since the last request, this
+    /// defers rather than issuing immediately — `pump_paced_requests` picks
+    /// it up once due. With pacing disabled (the default), this always
+    /// issues immediately, matching the original unpaced behavior.
     fn request_next_frame(&mut self, node_id: u32, qh: &QueueHandle<WaylandState>) {
+        let Some(capture) = self.captures.get(&node_id) else {
+            return;
+        };
+        if capture.stopped {
+            return;
+        }
+        if Instant::now() < capture.next_request_due {
+            return;
+        }
+        self.issue_next_frame_request(node_id, qh);
+    }
+
+    /// Unconditionally issue the next frame's `create_frame` + `capture()`.
+    /// Called from `request_next_frame` when pacing allows it immediately,
+    /// or from `pump_paced_requests` once a deferred capture's pacing
+    /// interval has elapsed.
+    fn issue_next_frame_request(&mut self, node_id: u32, qh: &QueueHandle<WaylandState>) {
         let Some(capture) = self.captures.get_mut(&node_id) else {
             return;
         };
@@ -665,6 +705,48 @@ impl ExtCaptureState {
         }
 
         capture.pending_frame = Some(frame);
+        capture.next_request_due = Instant::now() + self.min_frame_interval;
+    }
+
+    /// Issue deferred frame requests whose pacing interval has elapsed.
+    ///
+    /// Pacing works by declining to issue a request immediately, so nothing
+    /// else generates a Wayland event to re-enter `on_frame_ready` and try
+    /// again. The event loop calls this periodically so paced captures
+    /// still make progress.
+    pub fn pump_paced_requests(&mut self, qh: &QueueHandle<WaylandState>) {
+        if self.min_frame_interval.is_zero() {
+            return;
+        }
+        let now = Instant::now();
+        let due: Vec<u32> = self
+            .captures
+            .iter()
+            .filter(|(_, c)| {
+                !c.stopped
+                    && c.pending_frame.is_none()
+                    && c.screenshot_reply.is_none()
+                    && now >= c.next_request_due
+            })
+            .map(|(&id, _)| id)
+            .collect();
+        for node_id in due {
+            self.issue_next_frame_request(node_id, qh);
+        }
+    }
+
+    /// Earliest instant at which a currently-deferred capture becomes due,
+    /// if any. Used by the event loop to size its poll timeout so paced
+    /// captures aren't held back by a coarser fixed timeout.
+    pub fn next_pump_wakeup(&self) -> Option<Instant> {
+        if self.min_frame_interval.is_zero() {
+            return None;
+        }
+        self.captures
+            .values()
+            .filter(|c| !c.stopped && c.pending_frame.is_none() && c.screenshot_reply.is_none())
+            .map(|c| c.next_request_due)
+            .min()
     }
 }
 

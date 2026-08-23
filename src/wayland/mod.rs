@@ -622,6 +622,16 @@ impl WaylandConnection {
         self.state.ext_capture.handshake_timeout = timeout;
     }
 
+    /// Set the minimum interval between capture requests on both capture
+    /// paths (wlr-screencopy and ext-image-copy-capture). Zero (the
+    /// default) disables pacing. Applies to whichever protocol is actually
+    /// selected at capture-start time — set on both up front since that
+    /// selection happens later, per-output, inside the event loop.
+    pub fn set_min_frame_interval(&mut self, interval: std::time::Duration) {
+        self.state.screencopy.set_min_frame_interval(interval);
+        self.state.ext_capture.set_min_frame_interval(interval);
+    }
+
     /// Get the queue handle for creating protocol objects.
     pub fn queue_handle(&self) -> &QueueHandle<WaylandState> {
         &self.queue_handle
@@ -716,6 +726,26 @@ impl WaylandConnection {
         }
     }
 
+    /// Compute the next `poll()` timeout in milliseconds.
+    ///
+    /// Capped at 100ms (the original fixed timeout). Shortened to the time
+    /// remaining until the earliest paced capture request is due, so
+    /// `set_min_frame_interval` pacing isn't coarsened by the poll cap when
+    /// nothing else is waking the loop (a deferred request produces no
+    /// Wayland socket traffic of its own to poll on).
+    fn next_pump_wakeup_ms(&self) -> i32 {
+        let now = std::time::Instant::now();
+        [
+            self.state.screencopy.next_pump_wakeup(),
+            self.state.ext_capture.next_pump_wakeup(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|due| due.saturating_duration_since(now).as_millis() as i32)
+        .min()
+        .map_or(100, |ms| ms.clamp(1, 100))
+    }
+
     /// Spawn a Wayland event loop on the current thread.
     ///
     /// This consumes the WaylandConnection and runs it in a blocking loop,
@@ -744,20 +774,25 @@ impl WaylandConnection {
         let fd = self.connection.as_fd().as_raw_fd();
 
         while !stop.load(Ordering::Relaxed) {
-            // Poll the Wayland fd with a 100ms timeout
+            // Poll the Wayland fd, capped at 100ms but shortened when a
+            // paced capture (see `set_min_frame_interval`) is due to fire
+            // sooner — otherwise the fixed 100ms cap would coarsen pacing
+            // for any interval tighter than that (e.g. 30fps ≈ 33ms).
+            let poll_timeout_ms = self.next_pump_wakeup_ms();
             let mut pollfd = libc::pollfd {
                 fd,
                 events: libc::POLLIN,
                 revents: 0,
             };
 
-            // SAFETY: pollfd is a valid local struct, nfds=1, timeout=100ms.
+            // SAFETY: pollfd is a valid local struct, nfds=1, timeout is a
+            // small non-negative millisecond value computed just above.
             // poll() is a standard POSIX syscall with no memory safety concerns here.
             #[expect(
                 unsafe_code,
                 reason = "poll() is a standard POSIX syscall with a valid local pollfd struct"
             )]
-            let poll_result = unsafe { libc::poll(&raw mut pollfd, 1, 100) };
+            let poll_result = unsafe { libc::poll(&raw mut pollfd, 1, poll_timeout_ms) };
 
             if poll_result < 0 {
                 let err = std::io::Error::last_os_error();
@@ -783,6 +818,15 @@ impl WaylandConnection {
             for node_id in timed_out {
                 self.state.ext_capture.stop_capture(node_id);
             }
+
+            // Issue any deferred (paced) capture requests that are now due.
+            // No-op when pacing is disabled (min_frame_interval == 0).
+            self.state
+                .screencopy
+                .pump_paced_requests(&self.queue_handle);
+            self.state
+                .ext_capture
+                .pump_paced_requests(&self.queue_handle);
 
             // Read new events from the Wayland socket into the internal buffer,
             // then dispatch them to handlers. prepare_read() + read_events()
