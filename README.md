@@ -29,7 +29,7 @@ ecosystem.
 | `Clipboard` | v1 | ext-data-control-v1 | wlr-data-control-v1 |
 | `Settings` | v2 | Environment variable config | GTK_THEME detection |
 | `Screenshot` | v2 | Single-frame capture to PNG | -- |
-| `InputCapture` | v2 | Session lifecycle, zones, EIS bridge | Barrier enforcement (Activated/Deactivated never fire yet) |
+| `InputCapture` | v2 | Barrier surfaces (wlr-layer-shell-v1) + pointer lock (zwp-pointer-constraints-v1) + EIS bridge (receiver context) | -- |
 
 Protocols are auto-detected at startup. The best available protocol is selected
 automatically with ext- protocols preferred over wlr- equivalents.

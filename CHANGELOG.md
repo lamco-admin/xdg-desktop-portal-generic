@@ -5,6 +5,62 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-08-24
+
+### Added
+
+- **`org.freedesktop.impl.portal.InputCapture`**, implemented across four
+  phases:
+  - **Phase 1**: fully spec-shaped D-Bus interface (all 9 methods, 4
+    signals, 2 properties), real session state, live monitor geometry for
+    `GetZones` (wraparound-safe `zone_set` versioning on hotplug/resize),
+    and full structural validation for `SetPointerBarriers`
+    (axis-aligned, non-degenerate, non-zero id, stale-`zone_set`
+    rejection). `ConnectToEIS` reuses the existing EIS bridge directly.
+    New additive types `InputCaptureZone`/`PointerBarrier`.
+  - **Phase 2a**: real, invisible `wlr-layer-shell-v1` barrier surfaces
+    created on `Enable()`, one per accepted barrier, positioned by a
+    pure barrier-to-geometry function. `Disable()`/`Release()`/session
+    close tear them down. `SupportedCapabilities` now gates on the
+    protocols that actually place and enforce barriers.
+  - **Phase 2b**: the pointer is locked on barrier entry
+    (`zwp_pointer_constraints_v1`), relative motion
+    (`zwp_relative_pointer_v1`) is delivered to the connected EIS client
+    in receiver context (the reverse direction from RemoteDesktop's
+    existing sender-context EIS use). `Activated`/`Deactivated` now carry
+    the spec's `activation_id` correlation. `Release()` ends only the
+    current activation, leaving barriers armed to re-trigger.
+  - **Phase 2c**: keyboard focus is grabbed for a captured session (a
+    real `wl_keyboard` bound in parallel to `wl_pointer`, toggling
+    `keyboard_interactivity` on the barrier surface), and
+    `cursor_position` (spec-optional on `Activated`/`Deactivated`/
+    `Release`) is computed from real barrier/zone geometry instead of
+    left unset. `InputBackend` gained three new trait methods
+    (`forward_captured_key`, `forward_captured_modifiers`,
+    `set_shared_wayland_state`) with default loud-error implementations,
+    so existing `InputBackend` implementors are not broken.
+
+### Fixed
+
+- **Pace `wlr-screencopy`/`ext-image-copy-capture` requests to avoid
+  wasted frames.** Both capture paths re-requested the next frame the
+  instant the previous one was delivered, with no rate limit. On
+  compositors that don't throttle fulfillment to their own repaint cycle
+  (observed: wayfire), this served requests as fast as asked, so most
+  captured frames were discarded by the downstream bounded channel before
+  reaching a consumer — real render + SHM-copy work wasted every time.
+  Both paths now support an opt-in `min_frame_interval`.
+- Suppress a clippy pedantic false positive
+  (`unused_async_trait_impl`) on `#[zbus::interface]` property getters —
+  the zbus macro requires literal `async fn` syntax and rejects the
+  lint's own suggested rewrite.
+- Clear the `anyhow` RUSTSEC-2026-0190 advisory (1.0.102 → 1.0.103).
+  `quick-xml` RUSTSEC-2026-0194/0195 is ignored in `deny.toml` with
+  rationale: it's a build-time-only proc-macro dependency of
+  `wayland-scanner` parsing trusted first-party protocol XML, absent
+  from the runtime binary, and a lock fix is blocked on
+  `wayland-scanner` bumping past its `quick-xml` < 0.41 pin upstream.
+
 ## [0.5.0] - 2026-06-18
 
 ### Breaking
