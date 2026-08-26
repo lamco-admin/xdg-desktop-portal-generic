@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-08-26
+
+### Fixed
+
+- **EIS frame-boundary loss**: events staged by a client between two
+  `ei_device.frame()` calls were forwarded to the wlr backend one at a
+  time instead of committed together, so a client that correctly
+  batched a coordinated group (e.g. move immediately followed by a
+  click) still had it split into separate compositor-visible events
+  here. `EisBridgeBackend` now stages converted events per session and
+  forwards them as one atomic batch when the frame boundary arrives,
+  via a new `InputBackend::inject_event_batch` method (default:
+  forwards to `inject_event` per event, so other implementors are
+  unaffected).
+- **Missing value-range validation** on incoming button codes and
+  keycodes: reis's own request converter doesn't bounds-check these
+  fields, so an out-of-range value from the wire reached the wlr
+  backend unfiltered. Added a check against the evdev `KEY_CNT` bound
+  (768); out-of-range values are logged and dropped.
+- **`ei_device.resumed()` sent before the client acknowledged
+  readiness**: a protocol v3+ device is supposed to withhold `resumed`
+  until the client's `ei_device.ready()` request arrives, but it was
+  being sent unconditionally right after device creation. Now gated on
+  the negotiated device version.
+- **Simultaneous diagonal scroll silently dropped one axis**: an
+  `ei_scroll.scroll_discrete` request carrying both X and Y in one
+  event only produced a single `ScrollDiscrete` `InputEvent`. Now
+  emits one event per nonzero axis.
+
+### Added
+
+- New unit tests for the value-range validation and diagonal-scroll
+  splitting logic.
+
 ## [0.6.0] - 2026-08-24
 
 ### Added
