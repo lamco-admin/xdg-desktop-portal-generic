@@ -110,6 +110,32 @@ pub trait InputBackend: Send + Sync {
     /// * `event` - The input event to inject
     fn inject_event(&mut self, session_id: &str, event: InputEvent) -> Result<()>;
 
+    /// Inject a batch of input events that must land atomically as one
+    /// compositor-visible unit -- the events staged between two EIS `frame()`
+    /// boundaries.
+    ///
+    /// Committing each event of a coordinated group (e.g. move-then-click)
+    /// individually lets the compositor process them as separate hardware
+    /// events, opening a race where the click can be observed at the
+    /// pre-move position. This method exists so a backend that has a native
+    /// "commit" concept (wlr's `pointer.frame()`) can defer it until every
+    /// event in the group has been applied.
+    ///
+    /// Default implementation forwards to [`Self::inject_event`] once per
+    /// event, preserving today's behavior for backends without a frame
+    /// concept (e.g. uinput, which is already kernel-atomic per `EV_SYN`).
+    ///
+    /// # Errors
+    ///
+    /// Returns the first error encountered; already-applied events in the
+    /// batch are not rolled back.
+    fn inject_event_batch(&mut self, session_id: &str, events: &[InputEvent]) -> Result<()> {
+        for event in events {
+            self.inject_event(session_id, event.clone())?;
+        }
+        Ok(())
+    }
+
     /// Process pending events (for event-loop integration).
     ///
     /// For EIS: Processes incoming client events from the socket.

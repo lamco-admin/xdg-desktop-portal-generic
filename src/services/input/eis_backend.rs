@@ -285,13 +285,32 @@ impl EisSession {
             },
         );
 
-        // Signal to the client that the device is ready for emulation
-        device.resumed();
+        // A v3+ `ei_device` withholds `resumed` until the client acknowledges
+        // `ei_device.done` with its own `ready()` request -- sending resumed
+        // unconditionally here let a client be told it may emulate/receive
+        // before it confirmed it was actually set up. v1/v2 devices have no
+        // `ready()` request at all and must be resumed immediately, same as
+        // before. The client's `ready()` (when it arrives) is handled in
+        // `eis_bridge.rs`'s `process_events`, which calls `resumed()` on the
+        // matching `Device` from the `EisRequest::Ready` event.
+        let device_version = device.device().version();
+        if device_version < 3 {
+            device.resumed();
+        } else {
+            tracing::debug!(
+                device_version,
+                "EIS device awaiting client ready() before resuming"
+            );
+        }
 
-        // Flush the seat/device/resumed events to the client
+        // Flush the seat/device[/resumed] events to the client
         let _ = self.context.flush();
 
-        tracing::debug!(is_receiver, "EIS session active, device resumed");
+        tracing::debug!(
+            is_receiver,
+            resumed_immediately = device_version < 3,
+            "EIS session active"
+        );
 
         self.phase = if is_receiver {
             SessionPhase::ActiveReceiver {

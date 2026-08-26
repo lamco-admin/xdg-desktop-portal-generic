@@ -28,6 +28,47 @@ use std::{collections::HashMap, os::unix::io::OwnedFd, sync::Arc};
 
 use reis::request::EisRequest;
 
+/// One past `KEY_MAX` (0x2ff) from Linux's `input-event-codes.h` -- the same
+/// bound libei's C server enforces on button codes and keycodes (see
+/// `upstream/reis/EI-EIS-DEEP-DIVE-2026-06-16.md` section 1, step 3 of its
+/// 4-step validation guard). reis 0.7's `EisRequestConverter` does not apply
+/// this itself, so it's enforced here at the point untrusted wire values
+/// become our internal `InputEvent`.
+const EVDEV_KEY_CNT: u32 = 768;
+
+/// Reject a button code or keycode outside the evdev range, logging why.
+/// `kind` is only used for the log message ("button" / "keycode").
+fn validate_evdev_code(code: u32, kind: &str) -> Option<u32> {
+    if code >= EVDEV_KEY_CNT {
+        tracing::warn!(kind, code, "EIS code out of evdev range -- dropped");
+        return None;
+    }
+    Some(code)
+}
+
+/// Convert one `ei_scroll.scroll_discrete` request into one event per nonzero
+/// axis. A client can report both axes in the same request (simultaneous
+/// diagonal scroll on modern trackpads); returning at most one event would
+/// silently drop whichever axis wasn't picked.
+fn scroll_discrete_events(discrete_dx: i32, discrete_dy: i32, time_usec: u64) -> Vec<InputEvent> {
+    let mut events = Vec::with_capacity(2);
+    if discrete_dy != 0 {
+        events.push(InputEvent::Pointer(PointerEvent::ScrollDiscrete {
+            axis: ScrollAxis::Vertical,
+            steps: discrete_dy,
+            time_usec,
+        }));
+    }
+    if discrete_dx != 0 {
+        events.push(InputEvent::Pointer(PointerEvent::ScrollDiscrete {
+            axis: ScrollAxis::Horizontal,
+            steps: discrete_dx,
+            time_usec,
+        }));
+    }
+    events
+}
+
 use super::{
     InputBackend, InputProtocol, WlrConfig, eis_backend::EisSession, wlr_backend::WlrInputBackend,
 };
@@ -47,6 +88,10 @@ use crate::{
 pub struct EisBridgeBackend {
     /// Per-session EIS state.
     sessions: HashMap<String, EisSession>,
+    /// Events staged since the session's last EIS `frame()`, forwarded to
+    /// `wlr` as one atomic batch when the frame boundary arrives. See
+    /// [`InputBackend::inject_event_batch`] for why this matters.
+    pending_events: HashMap<String, Vec<InputEvent>>,
     /// Shared wlr backend for all sessions' output.
     wlr: WlrInputBackend,
     /// Health event sender for input metrics.
@@ -68,120 +113,120 @@ impl EisBridgeBackend {
 
         Ok(Self {
             sessions: HashMap::new(),
+            pending_events: HashMap::new(),
             wlr,
             health_tx: None,
             shared_wayland_state: None,
         })
     }
 
-    /// Convert a high-level `EisRequest` to our `InputEvent`.
+    /// Convert a high-level `EisRequest` to zero or more `InputEvent`s.
     ///
-    /// Returns `None` for protocol-level events that don't map to input
-    /// (Bind, Frame, DeviceStart/StopEmulating, Disconnect).
-    fn eis_request_to_input_event(request: &EisRequest) -> Option<InputEvent> {
+    /// Returns an empty `Vec` for protocol-level events that don't map to
+    /// input (Bind, Frame, DeviceStart/StopEmulating, Disconnect) and for
+    /// requests that fail value-range validation (out-of-range button code
+    /// or keycode -- logged and dropped rather than forwarded, matching
+    /// libei's `VALUE`-class rejection). Returns two events for a
+    /// `ScrollDiscrete` request that carries both axes at once (simultaneous
+    /// diagonal scroll) -- a single event would silently drop one axis.
+    fn eis_request_to_input_event(request: &EisRequest) -> Vec<InputEvent> {
         match request {
-            EisRequest::PointerMotion(m) => Some(InputEvent::Pointer(PointerEvent::Motion {
+            EisRequest::PointerMotion(m) => vec![InputEvent::Pointer(PointerEvent::Motion {
                 dx: f64::from(m.dx),
                 dy: f64::from(m.dy),
                 time_usec: m.time,
-            })),
+            })],
 
             EisRequest::PointerMotionAbsolute(m) => {
                 // EIS absolute coords are in device-region pixels; we don't have
                 // that region here, so signal "already normalized" with 0 extents.
                 // libei callers that need correct multi-monitor mapping must use
                 // the wlr backend path with explicit extents.
-                Some(InputEvent::Pointer(PointerEvent::MotionAbsolute {
+                vec![InputEvent::Pointer(PointerEvent::MotionAbsolute {
                     x: f64::from(m.dx_absolute),
                     y: f64::from(m.dy_absolute),
                     x_extent: 0,
                     y_extent: 0,
                     stream: 0,
                     time_usec: m.time,
-                }))
+                })]
             }
 
             EisRequest::Button(b) => {
+                let Some(button) = validate_evdev_code(b.button, "button") else {
+                    return vec![];
+                };
                 let state = match b.state {
                     reis::eis::button::ButtonState::Press => ButtonState::Pressed,
                     reis::eis::button::ButtonState::Released => ButtonState::Released,
                 };
-                Some(InputEvent::Pointer(PointerEvent::Button {
-                    button: b.button,
+                vec![InputEvent::Pointer(PointerEvent::Button {
+                    button,
                     state,
                     time_usec: b.time,
-                }))
+                })]
             }
 
-            EisRequest::ScrollDelta(s) => Some(InputEvent::Pointer(PointerEvent::Scroll {
+            EisRequest::ScrollDelta(s) => vec![InputEvent::Pointer(PointerEvent::Scroll {
                 dx: f64::from(s.dx),
                 dy: f64::from(s.dy),
                 time_usec: s.time,
-            })),
+            })],
 
             EisRequest::ScrollDiscrete(s) => {
-                // Prefer vertical if both are set
-                if s.discrete_dy != 0 {
-                    Some(InputEvent::Pointer(PointerEvent::ScrollDiscrete {
-                        axis: ScrollAxis::Vertical,
-                        steps: s.discrete_dy,
-                        time_usec: s.time,
-                    }))
-                } else {
-                    Some(InputEvent::Pointer(PointerEvent::ScrollDiscrete {
-                        axis: ScrollAxis::Horizontal,
-                        steps: s.discrete_dx,
-                        time_usec: s.time,
-                    }))
-                }
+                scroll_discrete_events(s.discrete_dx, s.discrete_dy, s.time)
             }
 
             EisRequest::ScrollStop(s) => {
-                let _ = s;
-                Some(InputEvent::Pointer(PointerEvent::ScrollStop {
+                vec![InputEvent::Pointer(PointerEvent::ScrollStop {
                     time_usec: s.time,
-                }))
+                })]
             }
 
             EisRequest::KeyboardKey(k) => {
+                let Some(keycode) = validate_evdev_code(k.key, "keycode") else {
+                    return vec![];
+                };
                 let state = match k.state {
                     reis::eis::keyboard::KeyState::Press => KeyState::Pressed,
                     reis::eis::keyboard::KeyState::Released => KeyState::Released,
                 };
-                Some(InputEvent::Keyboard(KeyboardEvent {
-                    keycode: k.key,
+                vec![InputEvent::Keyboard(KeyboardEvent {
+                    keycode,
                     state,
                     time_usec: k.time,
-                }))
+                })]
             }
 
-            EisRequest::TouchDown(t) => Some(InputEvent::Touch(TouchEvent::Down {
+            EisRequest::TouchDown(t) => vec![InputEvent::Touch(TouchEvent::Down {
                 id: t.touch_id as i32,
                 x: f64::from(t.x),
                 y: f64::from(t.y),
                 stream: 0,
                 time_usec: t.time,
-            })),
+            })],
 
-            EisRequest::TouchMotion(t) => Some(InputEvent::Touch(TouchEvent::Motion {
+            EisRequest::TouchMotion(t) => vec![InputEvent::Touch(TouchEvent::Motion {
                 id: t.touch_id as i32,
                 x: f64::from(t.x),
                 y: f64::from(t.y),
                 stream: 0,
                 time_usec: t.time,
-            })),
+            })],
 
-            EisRequest::TouchUp(t) => Some(InputEvent::Touch(TouchEvent::Up {
+            EisRequest::TouchUp(t) => vec![InputEvent::Touch(TouchEvent::Up {
                 id: t.touch_id as i32,
                 time_usec: t.time,
-            })),
+            })],
 
             // Protocol-level events don't produce an InputEvent.
-            // Frame and DeviceStart/StopEmulating carry health data harvested in
-            // process_events(); DeviceClosed teardown is also handled there.
-            // RequestDevice/Ready are sender-context or lifecycle-only. TextKeysym/TextUtf8
-            // (the libei 1.6 `ei_text` capability) are not forwarded yet — text injection is
-            // a separate, unimplemented capability that the bridge does not advertise.
+            // Frame is handled by the caller (frame-boundary batching);
+            // DeviceStart/StopEmulating carry health data harvested in
+            // process_events(); DeviceClosed teardown and Ready/resumed
+            // gating are also handled there. RequestDevice is sender-context
+            // lifecycle-only. TextKeysym/TextUtf8 (the libei 1.6 `ei_text`
+            // capability) are not forwarded yet -- text injection is a
+            // separate, unimplemented capability the bridge does not advertise.
             EisRequest::Disconnect
             | EisRequest::Bind(_)
             | EisRequest::Frame(_)
@@ -193,7 +238,7 @@ impl EisBridgeBackend {
             | EisRequest::RequestDevice(_)
             | EisRequest::Ready(_)
             | EisRequest::TextKeysym(_)
-            | EisRequest::TextUtf8(_) => None,
+            | EisRequest::TextUtf8(_) => vec![],
         }
     }
 }
@@ -239,6 +284,19 @@ impl InputBackend for EisBridgeBackend {
     fn destroy_context(&mut self, session_id: &str) -> Result<()> {
         if self.sessions.remove(session_id).is_some() {
             tracing::info!(session_id = %session_id, "EIS bridge context destroyed");
+        }
+
+        // Drop any events staged since the last frame -- they were never
+        // atomically committed, so discarding rather than flushing them
+        // unframed is correct.
+        if let Some(dropped) = self.pending_events.remove(session_id) {
+            if !dropped.is_empty() {
+                tracing::warn!(
+                    session_id = %session_id,
+                    count = dropped.len(),
+                    "Dropping unframed pending EIS events on session teardown"
+                );
+            }
         }
 
         // Clean up wlr virtual devices
@@ -301,6 +359,40 @@ impl InputBackend for EisBridgeBackend {
                                         },
                                     );
                                 }
+
+                                // The client's frame boundary: everything staged
+                                // since the last one must land on the compositor
+                                // as one atomic unit, not as separate flushes.
+                                if let Some(batch) = self.pending_events.remove(session_id) {
+                                    if !batch.is_empty() {
+                                        if let Err(e) =
+                                            self.wlr.inject_event_batch(session_id, &batch)
+                                        {
+                                            tracing::warn!(
+                                                session_id = %session_id,
+                                                error = %e,
+                                                count = batch.len(),
+                                                "Failed to forward EIS frame batch to wlr"
+                                            );
+                                        }
+                                        for event in batch {
+                                            all_events.push((session_id.clone(), event));
+                                        }
+                                    }
+                                }
+                            }
+                            // A v3+ device withholds `resumed` (hence all input)
+                            // until the client acknowledges `ei_device.done` with
+                            // `ready()` -- see eis_backend.rs's version-gated
+                            // `transition_to_active`. Applies uniformly to both
+                            // sender and receiver-context devices since it's a
+                            // device lifecycle gate, not a content-direction one.
+                            EisRequest::Ready(ready) => {
+                                tracing::debug!(
+                                    session_id = %session_id,
+                                    "EIS device ready() received; resuming"
+                                );
+                                ready.device.resumed();
                             }
                             EisRequest::DeviceStartEmulating(evt) => {
                                 if let Some(ref health_tx) = self.health_tx {
@@ -337,31 +429,31 @@ impl InputBackend for EisBridgeBackend {
                             _ => {}
                         }
 
-                        if let Some(event) = Self::eis_request_to_input_event(request) {
-                            if session.is_receiver() {
-                                // A receiver-context session (InputCapture) is never
-                                // supposed to send content requests -- it's the one
-                                // receiving, not emulating. Log and drop rather than
-                                // forwarding a malformed/unexpected event to the
-                                // real compositor.
-                                tracing::warn!(
-                                    session_id = %session_id,
-                                    "Unexpected content event from receiver-context EIS session -- dropped"
-                                );
-                                continue;
-                            }
-
-                            // Forward the event to the compositor via wlr
-                            if let Err(e) = self.wlr.inject_event(session_id, event.clone()) {
-                                tracing::warn!(
-                                    session_id = %session_id,
-                                    error = %e,
-                                    "Failed to forward EIS event to wlr"
-                                );
-                            }
-
-                            all_events.push((session_id.clone(), event));
+                        let converted = Self::eis_request_to_input_event(request);
+                        if converted.is_empty() {
+                            continue;
                         }
+
+                        if session.is_receiver() {
+                            // A receiver-context session (InputCapture) is never
+                            // supposed to send content requests -- it's the one
+                            // receiving, not emulating. Log and drop rather than
+                            // forwarding a malformed/unexpected event to the
+                            // real compositor.
+                            tracing::warn!(
+                                session_id = %session_id,
+                                "Unexpected content event from receiver-context EIS session -- dropped"
+                            );
+                            continue;
+                        }
+
+                        // Stage rather than forward immediately -- committed
+                        // atomically as one batch when this session's
+                        // EisRequest::Frame arrives (see the Frame arm above).
+                        self.pending_events
+                            .entry(session_id.clone())
+                            .or_default()
+                            .extend(converted);
                     }
                 }
                 Err(e) => {
@@ -483,10 +575,82 @@ mod tests {
 
     #[test]
     fn test_eis_request_to_input_event_disconnect_returns_none() {
-        let event = EisBridgeBackend::eis_request_to_input_event(&EisRequest::Disconnect);
+        let events = EisBridgeBackend::eis_request_to_input_event(&EisRequest::Disconnect);
         assert!(
-            event.is_none(),
+            events.is_empty(),
             "Disconnect should not produce an InputEvent"
         );
+    }
+
+    #[test]
+    fn test_validate_evdev_code_accepts_in_range() {
+        assert_eq!(validate_evdev_code(0, "button"), Some(0));
+        assert_eq!(validate_evdev_code(767, "keycode"), Some(767));
+    }
+
+    #[test]
+    fn test_validate_evdev_code_rejects_out_of_range() {
+        assert_eq!(validate_evdev_code(768, "button"), None);
+        assert_eq!(validate_evdev_code(u32::MAX, "keycode"), None);
+    }
+
+    #[test]
+    fn test_scroll_discrete_vertical_only() {
+        let events = scroll_discrete_events(0, 3, 1000);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            InputEvent::Pointer(PointerEvent::ScrollDiscrete {
+                axis: ScrollAxis::Vertical,
+                steps: 3,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn test_scroll_discrete_horizontal_only() {
+        let events = scroll_discrete_events(-2, 0, 1000);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            InputEvent::Pointer(PointerEvent::ScrollDiscrete {
+                axis: ScrollAxis::Horizontal,
+                steps: -2,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn test_scroll_discrete_diagonal_emits_both_axes() {
+        let events = scroll_discrete_events(-2, 3, 1000);
+        assert_eq!(
+            events.len(),
+            2,
+            "simultaneous diagonal scroll must not drop an axis"
+        );
+        assert!(matches!(
+            events[0],
+            InputEvent::Pointer(PointerEvent::ScrollDiscrete {
+                axis: ScrollAxis::Vertical,
+                steps: 3,
+                ..
+            })
+        ));
+        assert!(matches!(
+            events[1],
+            InputEvent::Pointer(PointerEvent::ScrollDiscrete {
+                axis: ScrollAxis::Horizontal,
+                steps: -2,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn test_scroll_discrete_zero_emits_nothing() {
+        let events = scroll_discrete_events(0, 0, 1000);
+        assert!(events.is_empty());
     }
 }

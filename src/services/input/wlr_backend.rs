@@ -397,6 +397,261 @@ impl WlrInputBackend {
             ))),
         }
     }
+
+    /// Apply one event's wl_pointer/wl_keyboard protocol calls, without
+    /// committing a `pointer.frame()` or flushing.
+    ///
+    /// Split out of [`InputBackend::inject_event`] so
+    /// [`InputBackend::inject_event_batch`] can apply several events and
+    /// commit exactly one frame for the whole group. Committing each event
+    /// of a coordinated group (move-then-click) individually lets the
+    /// compositor process them as separate hardware events, opening a race
+    /// where the click can be observed at the pre-move position.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "match arms for each input event variant are individually simple"
+    )]
+    fn apply_event(&mut self, session_id: &str, event: &InputEvent) -> Result<()> {
+        let ctx = self
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| PortalError::SessionNotFound(session_id.to_string()))?;
+
+        let time_ms = |time_usec: u64| (time_usec / 1000) as u32;
+
+        match *event {
+            InputEvent::Pointer(PointerEvent::Motion { dx, dy, time_usec }) => {
+                if let Some(ref pointer) = ctx.pointer {
+                    pointer.motion(time_ms(time_usec), dx, dy);
+                }
+            }
+
+            InputEvent::Pointer(PointerEvent::MotionAbsolute {
+                x,
+                y,
+                x_extent,
+                y_extent,
+                stream,
+                time_usec,
+            }) => {
+                if let Some(ref pointer) = ctx.pointer {
+                    // Normalize caller input to [0,1] within the source frame.
+                    // x_extent==0 means caller already normalized (legacy D-Bus path).
+                    let nx = if x_extent == 0 {
+                        x
+                    } else {
+                        x / f64::from(x_extent)
+                    };
+                    let ny = if y_extent == 0 {
+                        y
+                    } else {
+                        y / f64::from(y_extent)
+                    };
+                    let nx = nx.clamp(0.0, 1.0);
+                    let ny = ny.clamp(0.0, 1.0);
+
+                    let extent = 10000u32;
+                    let mapping_hit = self.stream_mappings.contains_key(&stream);
+                    let (abs_x, abs_y) = if let Some(mapping) = self.stream_mappings.get(&stream) {
+                        // Translate normalized stream coords to compositor-global pixels
+                        // (output position + normalized * output size), then re-normalize
+                        // against total compositor extent for the wlr protocol.
+                        let pixel_x = f64::from(mapping.x) + nx * f64::from(mapping.width);
+                        let pixel_y = f64::from(mapping.y) + ny * f64::from(mapping.height);
+                        let (total_w, total_h) = self.compute_total_extent();
+                        let ax = ((pixel_x / f64::from(total_w)) * f64::from(extent)) as u32;
+                        let ay = ((pixel_y / f64::from(total_h)) * f64::from(extent)) as u32;
+                        (ax, ay)
+                    } else {
+                        // No mapping: project normalized coords directly to wlr extent.
+                        let ax = (nx * f64::from(extent)) as u32;
+                        let ay = (ny * f64::from(extent)) as u32;
+                        (ax, ay)
+                    };
+
+                    tracing::trace!(
+                        x_in = x,
+                        y_in = y,
+                        x_extent,
+                        y_extent,
+                        stream,
+                        nx,
+                        ny,
+                        abs_x,
+                        abs_y,
+                        wlr_extent = extent,
+                        mapping_hit,
+                        "wlr inject MotionAbsolute"
+                    );
+
+                    pointer.motion_absolute(time_ms(time_usec), abs_x, abs_y, extent, extent);
+                }
+            }
+
+            InputEvent::Pointer(PointerEvent::Button {
+                button,
+                state,
+                time_usec,
+            }) => {
+                if let Some(ref pointer) = ctx.pointer {
+                    let wl_state = match state {
+                        ButtonState::Pressed => WlButtonState::Pressed,
+                        ButtonState::Released => WlButtonState::Released,
+                    };
+                    pointer.button(time_ms(time_usec), button, wl_state);
+                }
+            }
+
+            InputEvent::Pointer(PointerEvent::Scroll { dx, dy, time_usec }) => {
+                if let Some(ref pointer) = ctx.pointer {
+                    use wayland_client::protocol::wl_pointer::Axis;
+
+                    // Set axis source before axis events (protocol compliance)
+                    pointer
+                        .axis_source(wayland_client::protocol::wl_pointer::AxisSource::Continuous);
+
+                    if dy.abs() > f64::EPSILON {
+                        pointer.axis(time_ms(time_usec), Axis::VerticalScroll, dy);
+                    }
+                    if dx.abs() > f64::EPSILON {
+                        pointer.axis(time_ms(time_usec), Axis::HorizontalScroll, dx);
+                    }
+
+                    // Send axis_stop when both values are zero (scroll end)
+                    if dy.abs() <= f64::EPSILON && dx.abs() <= f64::EPSILON {
+                        pointer.axis_stop(time_ms(time_usec), Axis::VerticalScroll);
+                        pointer.axis_stop(time_ms(time_usec), Axis::HorizontalScroll);
+                    }
+                }
+            }
+
+            InputEvent::Pointer(PointerEvent::ScrollDiscrete {
+                axis,
+                steps,
+                time_usec,
+            }) => {
+                if let Some(ref pointer) = ctx.pointer {
+                    use wayland_client::protocol::wl_pointer::Axis;
+
+                    // Discrete scroll uses wheel axis source
+                    pointer.axis_source(wayland_client::protocol::wl_pointer::AxisSource::Wheel);
+
+                    let wl_axis = match axis {
+                        ScrollAxis::Vertical => Axis::VerticalScroll,
+                        ScrollAxis::Horizontal => Axis::HorizontalScroll,
+                    };
+                    let value = (steps as f64) * 15.0;
+                    pointer.axis_discrete(time_ms(time_usec), wl_axis, value, steps);
+                }
+            }
+
+            InputEvent::Pointer(PointerEvent::ScrollStop { time_usec }) => {
+                if let Some(ref pointer) = ctx.pointer {
+                    use wayland_client::protocol::wl_pointer::Axis;
+                    pointer.axis_stop(time_ms(time_usec), Axis::VerticalScroll);
+                    pointer.axis_stop(time_ms(time_usec), Axis::HorizontalScroll);
+                }
+            }
+
+            InputEvent::Keyboard(KeyboardEvent {
+                keycode,
+                state,
+                time_usec,
+            }) => {
+                if let Some(ref keyboard) = ctx.keyboard {
+                    use xkbcommon::xkb;
+
+                    let wl_state = match state {
+                        KeyState::Pressed => 1u32,
+                        KeyState::Released => 0u32,
+                    };
+
+                    // Run the event through xkb state so we can serialize the
+                    // current modifier mask, then emit modifiers() BEFORE key()
+                    // so xkb-aware consumers see the modifier as held while the
+                    // key arrives. Without modifiers(), key(c) with Ctrl held
+                    // arrives as bare 'c' — observed in the field as Ctrl+C
+                    // producing "C" in a terminal.
+                    //
+                    // xkbcommon's update_key takes xkb keycodes (evdev + 8);
+                    // the virtual-keyboard protocol's key() takes evdev keycodes
+                    // (the compositor adds 8 internally for keymap lookup).
+                    if let Some(xkb_data) = self.state.xkb.as_mut() {
+                        let direction = match state {
+                            KeyState::Pressed => xkb::KeyDirection::Down,
+                            KeyState::Released => xkb::KeyDirection::Up,
+                        };
+                        let xkb_keycode: xkb::Keycode = (keycode.saturating_add(8)).into();
+                        xkb_data.state.update_key(xkb_keycode, direction);
+
+                        let mods_depressed =
+                            xkb_data.state.serialize_mods(xkb::STATE_MODS_DEPRESSED);
+                        let mods_latched = xkb_data.state.serialize_mods(xkb::STATE_MODS_LATCHED);
+                        let mods_locked = xkb_data.state.serialize_mods(xkb::STATE_MODS_LOCKED);
+                        let group = xkb_data.state.serialize_layout(xkb::STATE_LAYOUT_EFFECTIVE);
+
+                        keyboard.modifiers(mods_depressed, mods_latched, mods_locked, group);
+                    }
+
+                    keyboard.key(time_ms(time_usec), keycode, wl_state);
+                }
+            }
+
+            InputEvent::Touch(_) => {
+                // wlr-virtual-pointer does not support real touch input.
+                // Touch is not advertised in AvailableDeviceTypes, so clients
+                // should not send touch events. Return a clean error.
+                return Err(PortalError::Config(
+                    "Touch input not supported via wlr virtual pointer protocol".to_string(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Commit the pointer's pending protocol calls with one `pointer.frame()`,
+    /// then flush and account for the send (shared tail of
+    /// [`InputBackend::inject_event`] and [`InputBackend::inject_event_batch`]).
+    fn commit_and_flush(&mut self, session_id: &str, needs_pointer_frame: bool) -> Result<()> {
+        if needs_pointer_frame {
+            if let Some(ctx) = self.sessions.get(session_id) {
+                if let Some(ref pointer) = ctx.pointer {
+                    pointer.frame();
+                }
+            }
+        }
+
+        match self.flush() {
+            Ok(()) => {
+                self.events_forwarded += 1;
+
+                // Emit periodic InputBatch health event
+                if self.events_forwarded.is_multiple_of(100) {
+                    if let Some(ref health_tx) = self.health_tx {
+                        let _ = health_tx.try_send(crate::health::PortalHealthEvent::InputBatch {
+                            events_forwarded: self.events_forwarded,
+                            events_failed: self.flush_failures,
+                            protocol: crate::health::InputProtocolType::WlrVirtual,
+                        });
+                    }
+                }
+
+                Ok(())
+            }
+            Err(e) => {
+                self.flush_failures += 1;
+                if let Some(ref health_tx) = self.health_tx {
+                    let _ =
+                        health_tx.try_send(crate::health::PortalHealthEvent::InputDisconnected {
+                            reason: format!("Wayland flush failed: {e}"),
+                            recoverable: false,
+                        });
+                }
+                Err(e)
+            }
+        }
+    }
 }
 
 impl InputBackend for WlrInputBackend {
@@ -468,242 +723,22 @@ impl InputBackend for WlrInputBackend {
         Ok(())
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "match arms for each input event variant are individually simple"
-    )]
     fn inject_event(&mut self, session_id: &str, event: InputEvent) -> Result<()> {
-        let ctx = self
-            .sessions
-            .get(session_id)
-            .ok_or_else(|| PortalError::SessionNotFound(session_id.to_string()))?;
+        let needs_pointer_frame = matches!(event, InputEvent::Pointer(_));
+        self.apply_event(session_id, &event)?;
+        self.commit_and_flush(session_id, needs_pointer_frame)
+    }
 
-        let time_ms = |time_usec: u64| (time_usec / 1000) as u32;
-
-        match event {
-            InputEvent::Pointer(PointerEvent::Motion { dx, dy, time_usec }) => {
-                if let Some(ref pointer) = ctx.pointer {
-                    pointer.motion(time_ms(time_usec), dx, dy);
-                    pointer.frame();
-                }
-            }
-
-            InputEvent::Pointer(PointerEvent::MotionAbsolute {
-                x,
-                y,
-                x_extent,
-                y_extent,
-                stream,
-                time_usec,
-            }) => {
-                if let Some(ref pointer) = ctx.pointer {
-                    // Normalize caller input to [0,1] within the source frame.
-                    // x_extent==0 means caller already normalized (legacy D-Bus path).
-                    let nx = if x_extent == 0 {
-                        x
-                    } else {
-                        x / f64::from(x_extent)
-                    };
-                    let ny = if y_extent == 0 {
-                        y
-                    } else {
-                        y / f64::from(y_extent)
-                    };
-                    let nx = nx.clamp(0.0, 1.0);
-                    let ny = ny.clamp(0.0, 1.0);
-
-                    let extent = 10000u32;
-                    let mapping_hit = self.stream_mappings.contains_key(&stream);
-                    let (abs_x, abs_y) = if let Some(mapping) = self.stream_mappings.get(&stream) {
-                        // Translate normalized stream coords to compositor-global pixels
-                        // (output position + normalized * output size), then re-normalize
-                        // against total compositor extent for the wlr protocol.
-                        let pixel_x = f64::from(mapping.x) + nx * f64::from(mapping.width);
-                        let pixel_y = f64::from(mapping.y) + ny * f64::from(mapping.height);
-                        let (total_w, total_h) = self.compute_total_extent();
-                        let ax = ((pixel_x / f64::from(total_w)) * f64::from(extent)) as u32;
-                        let ay = ((pixel_y / f64::from(total_h)) * f64::from(extent)) as u32;
-                        (ax, ay)
-                    } else {
-                        // No mapping: project normalized coords directly to wlr extent.
-                        let ax = (nx * f64::from(extent)) as u32;
-                        let ay = (ny * f64::from(extent)) as u32;
-                        (ax, ay)
-                    };
-
-                    tracing::trace!(
-                        x_in = x,
-                        y_in = y,
-                        x_extent,
-                        y_extent,
-                        stream,
-                        nx,
-                        ny,
-                        abs_x,
-                        abs_y,
-                        wlr_extent = extent,
-                        mapping_hit,
-                        "wlr inject MotionAbsolute"
-                    );
-
-                    pointer.motion_absolute(time_ms(time_usec), abs_x, abs_y, extent, extent);
-                    pointer.frame();
-                }
-            }
-
-            InputEvent::Pointer(PointerEvent::Button {
-                button,
-                state,
-                time_usec,
-            }) => {
-                if let Some(ref pointer) = ctx.pointer {
-                    let wl_state = match state {
-                        ButtonState::Pressed => WlButtonState::Pressed,
-                        ButtonState::Released => WlButtonState::Released,
-                    };
-                    pointer.button(time_ms(time_usec), button, wl_state);
-                    pointer.frame();
-                }
-            }
-
-            InputEvent::Pointer(PointerEvent::Scroll { dx, dy, time_usec }) => {
-                if let Some(ref pointer) = ctx.pointer {
-                    use wayland_client::protocol::wl_pointer::Axis;
-
-                    // Set axis source before axis events (protocol compliance)
-                    pointer
-                        .axis_source(wayland_client::protocol::wl_pointer::AxisSource::Continuous);
-
-                    if dy.abs() > f64::EPSILON {
-                        pointer.axis(time_ms(time_usec), Axis::VerticalScroll, dy);
-                    }
-                    if dx.abs() > f64::EPSILON {
-                        pointer.axis(time_ms(time_usec), Axis::HorizontalScroll, dx);
-                    }
-
-                    // Send axis_stop when both values are zero (scroll end)
-                    if dy.abs() <= f64::EPSILON && dx.abs() <= f64::EPSILON {
-                        pointer.axis_stop(time_ms(time_usec), Axis::VerticalScroll);
-                        pointer.axis_stop(time_ms(time_usec), Axis::HorizontalScroll);
-                    }
-
-                    pointer.frame();
-                }
-            }
-
-            InputEvent::Pointer(PointerEvent::ScrollDiscrete {
-                axis,
-                steps,
-                time_usec,
-            }) => {
-                if let Some(ref pointer) = ctx.pointer {
-                    use wayland_client::protocol::wl_pointer::Axis;
-
-                    // Discrete scroll uses wheel axis source
-                    pointer.axis_source(wayland_client::protocol::wl_pointer::AxisSource::Wheel);
-
-                    let wl_axis = match axis {
-                        ScrollAxis::Vertical => Axis::VerticalScroll,
-                        ScrollAxis::Horizontal => Axis::HorizontalScroll,
-                    };
-                    let value = (steps as f64) * 15.0;
-                    pointer.axis_discrete(time_ms(time_usec), wl_axis, value, steps);
-                    pointer.frame();
-                }
-            }
-
-            InputEvent::Pointer(PointerEvent::ScrollStop { time_usec }) => {
-                if let Some(ref pointer) = ctx.pointer {
-                    use wayland_client::protocol::wl_pointer::Axis;
-                    pointer.axis_stop(time_ms(time_usec), Axis::VerticalScroll);
-                    pointer.axis_stop(time_ms(time_usec), Axis::HorizontalScroll);
-                    pointer.frame();
-                }
-            }
-
-            InputEvent::Keyboard(KeyboardEvent {
-                keycode,
-                state,
-                time_usec,
-            }) => {
-                if let Some(ref keyboard) = ctx.keyboard {
-                    use xkbcommon::xkb;
-
-                    let wl_state = match state {
-                        KeyState::Pressed => 1u32,
-                        KeyState::Released => 0u32,
-                    };
-
-                    // Run the event through xkb state so we can serialize the
-                    // current modifier mask, then emit modifiers() BEFORE key()
-                    // so xkb-aware consumers see the modifier as held while the
-                    // key arrives. Without modifiers(), key(c) with Ctrl held
-                    // arrives as bare 'c' — observed in the field as Ctrl+C
-                    // producing "C" in a terminal.
-                    //
-                    // xkbcommon's update_key takes xkb keycodes (evdev + 8);
-                    // the virtual-keyboard protocol's key() takes evdev keycodes
-                    // (the compositor adds 8 internally for keymap lookup).
-                    if let Some(xkb_data) = self.state.xkb.as_mut() {
-                        let direction = match state {
-                            KeyState::Pressed => xkb::KeyDirection::Down,
-                            KeyState::Released => xkb::KeyDirection::Up,
-                        };
-                        let xkb_keycode: xkb::Keycode = (keycode.saturating_add(8)).into();
-                        xkb_data.state.update_key(xkb_keycode, direction);
-
-                        let mods_depressed =
-                            xkb_data.state.serialize_mods(xkb::STATE_MODS_DEPRESSED);
-                        let mods_latched = xkb_data.state.serialize_mods(xkb::STATE_MODS_LATCHED);
-                        let mods_locked = xkb_data.state.serialize_mods(xkb::STATE_MODS_LOCKED);
-                        let group = xkb_data.state.serialize_layout(xkb::STATE_LAYOUT_EFFECTIVE);
-
-                        keyboard.modifiers(mods_depressed, mods_latched, mods_locked, group);
-                    }
-
-                    keyboard.key(time_ms(time_usec), keycode, wl_state);
-                }
-            }
-
-            InputEvent::Touch(_) => {
-                // wlr-virtual-pointer does not support real touch input.
-                // Touch is not advertised in AvailableDeviceTypes, so clients
-                // should not send touch events. Return a clean error.
-                return Err(PortalError::Config(
-                    "Touch input not supported via wlr virtual pointer protocol".to_string(),
-                ));
-            }
+    /// Apply every event in the batch, then commit exactly one
+    /// `pointer.frame()` (if any pointer event was present) and one flush --
+    /// see [`InputBackend::inject_event_batch`] for why atomicity matters here.
+    fn inject_event_batch(&mut self, session_id: &str, events: &[InputEvent]) -> Result<()> {
+        let mut needs_pointer_frame = false;
+        for event in events {
+            needs_pointer_frame |= matches!(event, InputEvent::Pointer(_));
+            self.apply_event(session_id, event)?;
         }
-
-        match self.flush() {
-            Ok(()) => {
-                self.events_forwarded += 1;
-
-                // Emit periodic InputBatch health event
-                if self.events_forwarded.is_multiple_of(100) {
-                    if let Some(ref health_tx) = self.health_tx {
-                        let _ = health_tx.try_send(crate::health::PortalHealthEvent::InputBatch {
-                            events_forwarded: self.events_forwarded,
-                            events_failed: self.flush_failures,
-                            protocol: crate::health::InputProtocolType::WlrVirtual,
-                        });
-                    }
-                }
-
-                Ok(())
-            }
-            Err(e) => {
-                self.flush_failures += 1;
-                if let Some(ref health_tx) = self.health_tx {
-                    let _ =
-                        health_tx.try_send(crate::health::PortalHealthEvent::InputDisconnected {
-                            reason: format!("Wayland flush failed: {e}"),
-                            recoverable: false,
-                        });
-                }
-                Err(e)
-            }
-        }
+        self.commit_and_flush(session_id, needs_pointer_frame)
     }
 
     fn process_events(&mut self) -> Result<Vec<(String, InputEvent)>> {
