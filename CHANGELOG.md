@@ -114,8 +114,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   because local verification only built against the ambient toolchain
   (newer than MSRV); only caught by CI's separate `msrv` job, which stayed
   red across two pushes before being noticed. Un-chained into nested
-  `if let`. Local verification now also builds against the pinned MSRV
-  toolchain directly, not just the ambient one.
+  `if let`.
+- **`cargo doc` broken by a private intra-doc link.** `queue_frame`'s doc
+  comment (from the color-format fix above) linked to
+  `Self::build_video_format_pod`, a private method — rejected under
+  `rustdoc::private_intra_doc_links` with `-D warnings`, which CI's `doc`
+  job sets. Same root cause as the MSRV break above: local verification
+  didn't run `cargo doc` either. Dropped the link, kept the method name as
+  plain text. Local verification now runs all 7 of this crate's CI jobs
+  directly (fmt, clippy, test, doc, msrv, deny, package), not a subset.
 
 ## [0.6.1] - 2026-08-26
 
