@@ -52,7 +52,7 @@ use super::{
     dispatch::WaylandState,
     screencopy::{BufferFormatInfo, ShmFrameBuffer},
 };
-use crate::{pipewire::PipeWireManager, wayland::ScreenshotData};
+use crate::{pipewire::PipeWireManager, types::DamageRect, wayland::ScreenshotData};
 
 /// Counter for generating unique screenshot capture IDs in the ext protocol.
 /// Uses a different high range from screencopy to avoid collision.
@@ -138,6 +138,10 @@ pub struct ActiveExtCapture {
     pub shm_buffer: Option<ShmFrameBuffer>,
     /// The currently pending frame (waiting for ready/failed).
     pub pending_frame: Option<ExtImageCopyCaptureFrameV1>,
+    /// Damage regions accumulated from `damage` events since the current
+    /// frame's `capture()` request, applied (and cleared) on `ready`. A
+    /// frame can carry multiple `damage` events before `ready`, per spec.
+    pub pending_damage: Vec<DamageRect>,
     /// Whether the session has been stopped by the compositor.
     pub stopped: bool,
     /// If set, this is a one-shot screenshot capture.
@@ -260,6 +264,7 @@ impl ExtCaptureState {
             constraints: BufferConstraints::default(),
             shm_buffer: None,
             pending_frame: None,
+            pending_damage: Vec::new(),
             stopped: false,
             screenshot_reply: None,
             created_at: Instant::now(),
@@ -310,6 +315,7 @@ impl ExtCaptureState {
             constraints: BufferConstraints::default(),
             shm_buffer: None,
             pending_frame: None,
+            pending_damage: Vec::new(),
             stopped: false,
             screenshot_reply: Some(reply),
             created_at: Instant::now(),
@@ -463,6 +469,24 @@ impl ExtCaptureState {
         capture.pending_frame = Some(frame);
     }
 
+    /// Handle a `damage` event from a capture frame.
+    ///
+    /// A frame can carry more than one of these before its `ready` -- each
+    /// one is a separate changed rectangle, accumulated until `ready`
+    /// applies (and clears) them. Per spec, a session's first frame always
+    /// carries full damage; this is the compositor telling us so, not
+    /// something we need to special-case here.
+    pub fn on_frame_damage(&mut self, node_id: u32, x: i32, y: i32, width: i32, height: i32) {
+        if let Some(capture) = self.captures.get_mut(&node_id) {
+            capture.pending_damage.push(DamageRect {
+                x,
+                y,
+                width,
+                height,
+            });
+        }
+    }
+
     /// Handle the `ready` event from a capture frame.
     ///
     /// The compositor has finished writing pixel data.
@@ -476,7 +500,7 @@ impl ExtCaptureState {
             .and_then(|c| c.capture_started)
             .map(|start| start.elapsed());
 
-        let (data, width, height, stride, format_raw, is_screenshot) = {
+        let (data, width, height, stride, format_raw, is_screenshot, damage_regions) = {
             let Some(capture) = self.captures.get_mut(&node_id) else {
                 return;
             };
@@ -500,8 +524,17 @@ impl ExtCaptureState {
             let stride = buf.format.stride;
             let format_raw = buf.format.format_raw;
             let is_screenshot = capture.screenshot_reply.is_some();
+            let damage_regions = std::mem::take(&mut capture.pending_damage);
 
-            (data, width, height, stride, format_raw, is_screenshot)
+            (
+                data,
+                width,
+                height,
+                stride,
+                format_raw,
+                is_screenshot,
+                damage_regions,
+            )
         };
 
         if is_screenshot {
@@ -528,6 +561,15 @@ impl ExtCaptureState {
             // shared across separate Wayland/PipeWire connections). Fall back to
             // PipeWire's buffer pool when no direct channel is wired — mirrors
             // ScreencopyState's delivery branch.
+            // An empty list here already means "full frame" by RawFrame's own
+            // convention -- only report the real count to health when it's
+            // non-empty, else the actual number of damaged regions (1, the
+            // whole frame) for a compliant compositor that simply didn't send
+            // a damage event this time (defensive, shouldn't happen for ready
+            // frames since even the first frame is guaranteed full damage).
+            let damage_region_count =
+                u32::try_from(damage_regions.len().max(1)).unwrap_or(u32::MAX);
+
             if let Some(tx) = &self.frame_tx {
                 let frame = super::screencopy::RawFrame {
                     data,
@@ -535,6 +577,7 @@ impl ExtCaptureState {
                     height,
                     stride,
                     format_raw,
+                    damage_regions,
                 };
                 if tx.send(frame).is_err() {
                     tracing::warn!(node_id, "ext capture: direct frame channel closed");
@@ -555,7 +598,7 @@ impl ExtCaptureState {
                     capture_latency: capture_latency.unwrap_or(std::time::Duration::ZERO),
                     frame_size_bytes: frame_size,
                     frame_number: self.frame_count,
-                    damage_region_count: 1,
+                    damage_region_count,
                 });
             }
 
@@ -569,6 +612,11 @@ impl ExtCaptureState {
             if let Some(frame) = capture.pending_frame.take() {
                 frame.destroy();
             }
+            // The failed frame's buffer was never read; any damage regions
+            // that arrived for it are moot. The retry's own capture() will
+            // get a fresh damage sequence relative to the last frame we
+            // actually read.
+            capture.pending_damage.clear();
 
             // For screenshots, send error and remove
             if capture.screenshot_reply.is_some() {

@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its fields, or constructing via the crate's own APIs, is unaffected).
   Bumping the minor version per this project's 0.x SemVer convention
   rather than treating it as a patch.
+- **`RawFrame` gained public `damage_regions: Vec<DamageRect>`.** Same
+  situation as `SourceInfo` above — public field, no `#[non_exhaustive]`,
+  breaks external struct-literal construction only.
 
 ### Added
 
@@ -29,6 +32,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cap. Additive to the existing per-keystroke forwarding, and entirely
   optional — its absence never affects barrier/lock/keyboard-focus
   behavior.
+- **`ei_text.utf8` injection requests are now realized**, completing the
+  `TextKeysym` fix below: a whole string is decomposed into a
+  press+release keypress sequence via the same dynamic keysym pool,
+  since the underlying virtual keyboard protocol has no "type this
+  string" primitive.
+- **`ext-image-copy-capture` damage-region tracking.** The compositor's
+  per-frame `damage` events (previously logged and discarded) are now
+  accumulated and exposed as `RawFrame::damage_regions` on the direct
+  in-process frame channel — an empty list still means "whole frame
+  changed" (the `wlr-screencopy` path's own real, unavoidable behavior),
+  but the `ext` path now reports real incremental regions when the
+  compositor provides them. `PortalHealthEvent::FrameCaptured`'s
+  `damage_region_count` reports the real count instead of a hardcoded
+  `1`. Publishing the same regions over the PipeWire wire protocol
+  (`SPA_META_VideoDamage`, for non-embedded consumers) is a separate,
+  not-yet-implemented remainder — see `DAMAGE-REGION-TRACKING-2026-09-07.md`
+  in the lamco-admin planning notes for this project.
 
 ### Fixed
 
@@ -87,8 +107,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a small LRU pool of dynamically-bound keycodes, layered on top of the
   self-generated "us" XKB keymap via on-the-fly keymap text splicing and
   re-upload, when a keysym has no keycode in the static base layout.
-  `EisRequest::TextUtf8` has no realization path yet (nothing sends it) and
-  is logged rather than silently dropped.
+  `EisRequest::TextUtf8` is realized too now (see Added, above).
 - **MSRV (Rust 1.87) build broken by a let-chain.** The keymap re-upload
   loop added above used `if let ... && let ...`, a Rust 1.88 feature — one
   minor version past this crate's declared MSRV. Passed every local check

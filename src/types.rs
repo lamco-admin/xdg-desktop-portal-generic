@@ -137,6 +137,27 @@ pub struct InputCaptureZone {
     pub y: i32,
 }
 
+/// One damaged (changed) rectangle within a captured frame, in buffer-local
+/// pixel coordinates -- from `ext_image_copy_capture_frame_v1.damage`.
+///
+/// An empty damage list on [`crate::wayland::screencopy::RawFrame`] means
+/// "treat the whole frame as damaged": the `wlr-screencopy` capture path
+/// never receives per-region damage at all (only the `copy_with_damage`
+/// request variant emits it, and this crate always uses plain `copy`), and
+/// even on the `ext-image-copy-capture` path a compliant compositor's first
+/// frame in a session always carries full damage anyway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DamageRect {
+    /// X coordinate of the damaged region's top-left corner.
+    pub x: i32,
+    /// Y coordinate of the damaged region's top-left corner.
+    pub y: i32,
+    /// Damaged region width in pixels.
+    pub width: i32,
+    /// Damaged region height in pixels.
+    pub height: i32,
+}
+
 /// A pointer barrier submitted via `InputCapture.SetPointerBarriers`.
 ///
 /// Per spec, a barrier must be axis-aligned: horizontal (`y1 == y2`) or

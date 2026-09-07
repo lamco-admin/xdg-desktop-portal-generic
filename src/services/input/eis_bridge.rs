@@ -69,6 +69,28 @@ fn scroll_discrete_events(discrete_dx: i32, discrete_dy: i32, time_usec: u64) ->
     events
 }
 
+/// Convert one `char` to the XKB keysym `WlrInputBackend::keysym_to_keycode`
+/// should resolve it against, for decomposing an `ei_text.utf8` string into
+/// a sequence of keypresses.
+///
+/// Printable ASCII (0x20-0x7E) maps to its own codepoint -- the same value
+/// the base "us" XKB layout's own keys carry, so `keysym_to_keycode`'s fast
+/// path (a plain lookup against that layout) resolves it without touching
+/// the dynamic keysym pool. Everything else uses the Unicode-keysym
+/// convention (`0x0100_0000 + codepoint`), the same one
+/// `lamco-rdp-server-dev`'s own Unicode-keyboard fallback uses and the one
+/// already verified round-tripping through `splice_dynamic_keysyms` (see
+/// `test_splice_dynamic_keysyms_recompiles_and_resolves`, which uses exactly
+/// this convention for a Latin-1 codepoint, not just the higher planes).
+fn char_to_keysym(c: char) -> u32 {
+    let codepoint = c as u32;
+    if (0x20..=0x7E).contains(&codepoint) {
+        codepoint
+    } else {
+        0x0100_0000 + codepoint
+    }
+}
+
 use super::{
     InputBackend, InputProtocol, WlrConfig, eis_backend::EisSession, wlr_backend::WlrInputBackend,
 };
@@ -224,13 +246,12 @@ impl EisBridgeBackend {
             // DeviceStart/StopEmulating carry health data harvested in
             // process_events(); DeviceClosed teardown and Ready/resumed
             // gating are also handled there. RequestDevice is sender-context
-            // lifecycle-only. TextKeysym is also handled in process_events
-            // (resolving a keysym may need &mut self.wlr, unavailable to this
-            // pure function) -- reaching it here means it was already staged
-            // or logged there, so returning no additional event is correct,
-            // not a gap. TextUtf8 has no realization path yet (see
-            // EI-TEXT-SCOPING-2026-09-07.md in lamco-admin) and is logged in
-            // process_events rather than handled here.
+            // lifecycle-only. TextKeysym and TextUtf8 are also handled in
+            // process_events (resolving a keysym may need &mut self.wlr,
+            // unavailable to this pure function) -- reaching either here
+            // means it was already staged or logged there, so returning no
+            // additional event is correct, not a gap. See
+            // EI-TEXT-SCOPING-2026-09-07.md in lamco-admin for both.
             EisRequest::Disconnect
             | EisRequest::Bind(_)
             | EisRequest::Frame(_)
@@ -244,6 +265,56 @@ impl EisBridgeBackend {
             | EisRequest::TextKeysym(_)
             | EisRequest::TextUtf8(_) => vec![],
         }
+    }
+}
+
+/// Decompose an `ei_text.utf8` string into a press+release keypress
+/// sequence, staged into `pending_events` like any other input event -- the
+/// underlying virtual keyboard protocol only understands scancodes, not
+/// "type this text".
+///
+/// A free function taking `wlr`/`pending_events` as disjoint borrows
+/// (rather than an `&mut self` method) because its only caller holds a
+/// `&mut EisSession` borrowed from `self.sessions` at the same time --
+/// borrowing all of `self` here would conflict with that.
+///
+/// `TextUtf8` carries one timestamp for the whole string, not one per
+/// character, so each synthesized press/release edge gets a
+/// 1ms-incrementing timestamp from that base -- enough to keep them
+/// distinct and monotonically increasing downstream, not a claim about real
+/// per-key timing (there is none to reconstruct).
+fn inject_text_utf8(
+    wlr: &mut WlrInputBackend,
+    pending_events: &mut HashMap<String, Vec<InputEvent>>,
+    session_id: &str,
+    text: &str,
+    base_time_usec: u64,
+) {
+    let mut time_usec = base_time_usec;
+    for c in text.chars() {
+        let keysym = char_to_keysym(c);
+        let Some(keycode) = wlr.keysym_to_keycode(keysym) else {
+            tracing::warn!(
+                session_id = %session_id,
+                ch = %c,
+                keysym,
+                "No keycode available for ei_text.utf8 character -- dropped"
+            );
+            continue;
+        };
+        let events = pending_events.entry(session_id.to_string()).or_default();
+        events.push(InputEvent::Keyboard(KeyboardEvent {
+            keycode,
+            state: KeyState::Pressed,
+            time_usec,
+        }));
+        time_usec += 1000;
+        events.push(InputEvent::Keyboard(KeyboardEvent {
+            keycode,
+            state: KeyState::Released,
+            time_usec,
+        }));
+        time_usec += 1000;
     }
 }
 
@@ -474,17 +545,27 @@ impl InputBackend for EisBridgeBackend {
                                     }
                                 }
                             }
-                            // ei_text.utf8: no realization path yet (would need
-                            // decomposing into a sequence of per-codepoint keysym
-                            // binds). Nothing sends this today -- lamco-rdp-server
-                            // only ever sends TextKeysym -- so this is a deliberate
-                            // scope boundary, not an oversight. Logged rather than
-                            // silently dropped so a future real sender is visible.
+                            // ei_text.utf8 injection request: decomposes the whole
+                            // string into a press+release keypress sequence via
+                            // inject_text_utf8. Handled here rather than in
+                            // eis_request_to_input_event for the same reason as
+                            // TextKeysym -- resolving each character's keysym may
+                            // need &mut self.wlr.
                             EisRequest::TextUtf8(text_utf8) => {
-                                tracing::warn!(
-                                    session_id = %session_id,
-                                    len = text_utf8.text.len(),
-                                    "ei_text.utf8 received but not yet supported -- dropped"
+                                if session.is_receiver() {
+                                    tracing::warn!(
+                                        session_id = %session_id,
+                                        "Unexpected ei_text.utf8 from receiver-context EIS \
+                                         session -- dropped"
+                                    );
+                                    continue;
+                                }
+                                inject_text_utf8(
+                                    &mut self.wlr,
+                                    &mut self.pending_events,
+                                    session_id,
+                                    &text_utf8.text,
+                                    text_utf8.time,
                                 );
                             }
                             _ => {}
@@ -648,6 +729,41 @@ mod tests {
             events.is_empty(),
             "Disconnect should not produce an InputEvent"
         );
+    }
+
+    #[test]
+    fn test_char_to_keysym_ascii_maps_to_its_own_codepoint() {
+        // Matches the base "us" XKB layout's own keysyms, so
+        // keysym_to_keycode's fast path resolves these without touching
+        // the dynamic pool.
+        assert_eq!(char_to_keysym('a'), 0x61);
+        assert_eq!(char_to_keysym('A'), 0x41);
+        assert_eq!(char_to_keysym('0'), 0x30);
+        assert_eq!(char_to_keysym(' '), 0x20);
+        assert_eq!(char_to_keysym('~'), 0x7E);
+    }
+
+    #[test]
+    fn test_char_to_keysym_latin1_supplement_uses_unicode_convention() {
+        // é (U+00E9) has no key on a "us" layout -- must go through the
+        // dynamic pool via the Unicode-keysym convention, the same value
+        // already verified round-tripping through splice_dynamic_keysyms
+        // in wlr_backend.rs's own tests.
+        assert_eq!(char_to_keysym('é'), 0x0100_00E9);
+    }
+
+    #[test]
+    fn test_char_to_keysym_cjk_uses_unicode_convention() {
+        assert_eq!(char_to_keysym('世'), 0x0100_0000 + 0x4E16);
+    }
+
+    #[test]
+    fn test_char_to_keysym_boundary_just_outside_ascii_range() {
+        // 0x1F and 0x7F are just outside the printable-ASCII window this
+        // function special-cases -- must fall through to the Unicode
+        // convention, not be treated as direct keysyms.
+        assert_eq!(char_to_keysym('\u{1F}'), 0x0100_0000 + 0x1F);
+        assert_eq!(char_to_keysym('\u{7F}'), 0x0100_0000 + 0x7F);
     }
 
     #[test]

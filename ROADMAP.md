@@ -22,13 +22,16 @@ degrades cleanly to v5 (the property is simply omitted).
 
 Screen capture uses `ext-image-copy-capture-v1` as the primary path with
 `wlr-screencopy-unstable-v1` retained as the fallback. Cursor modes (hidden /
-embedded / metadata) and per-output capture are implemented. The remaining
-functional work on the ext path is **damage-region tracking** — consuming the
-protocol's per-frame `frame.damage` regions rather than always marking
-full-frame damage — and, longer term, **per-window capture** via
+embedded / metadata), per-output capture, and **damage-region tracking**
+(consuming the protocol's per-frame `frame.damage` regions, exposed as
+`RawFrame::damage_regions` on the direct in-process channel) are implemented.
+Publishing the same regions over the PipeWire wire protocol
+(`SPA_META_VideoDamage`, for non-embedded consumers) is a real, separate
+remainder — see `DAMAGE-REGION-TRACKING-2026-09-07.md` in the lamco-admin
+planning notes for this project. Longer term: **per-window capture** via
 `ext-image-capture-source-v1` foreign-toplevel sources on compositors that
-expose them. The underlying protocols are frozen and stable, so this is
-implementation work, not a protocol-version dependency.
+expose them — this needs a not-yet-ubiquitous protocol with real
+compositor-support uncertainty, bigger and less certain than it might sound.
 
 ## HDR / 10-bit capture
 
@@ -43,18 +46,6 @@ pixel-format propagation fix (carry the real captured format rather than assumin
 `BGRx`), which is the prerequisite; the `wlr-screencopy` path stays 8-bit. Full
 requirements (with fallback/no-regression bars) are tracked in the lamco-admin
 planning notes for this project (`10-BIT-HDR-CAPTURE-REQUIREMENTS-2026-07-07.md`).
-
-## Dependency modernization
-
-A non-breaking refresh of compatible dependencies rides each release. The
-deliberately-sequenced upgrades are:
-
-- **PipeWire / libspa 0.10** — small in practice (the loop `iterate()` timeout
-  argument becomes a `Timeout` enum); it also exposes SPA metadata wrappers
-  (`Buffer::find_meta`) used for cursor and damage handling, complementing the
-  ext-capture work above.
-- **reis 0.7** — the EIS bridge tracks the libei 1.6 generation of the
-  bindings (a small additive set of request variants).
 
 ## Public API surface
 

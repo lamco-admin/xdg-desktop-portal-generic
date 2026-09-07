@@ -32,7 +32,11 @@ use wayland_protocols_wlr::screencopy::v1::client::{
 };
 
 use super::dispatch::WaylandState;
-use crate::{pipewire::PipeWireManager, types::CursorMode, wayland::ScreenshotData};
+use crate::{
+    pipewire::PipeWireManager,
+    types::{CursorMode, DamageRect},
+    wayland::ScreenshotData,
+};
 
 /// Information about a buffer format offered by the compositor for a frame.
 #[derive(Debug, Clone, Copy)]
@@ -258,6 +262,13 @@ pub struct RawFrame {
     /// wrong channel order on any compositor that doesn't deliver xrgb8888
     /// (e.g. wlroots + virtio-gpu delivers xbgr8888).
     pub format_raw: u32,
+    /// Regions changed since the previous frame. Always empty on this
+    /// (wlr-screencopy) path -- see [`DamageRect`]'s own doc for why an
+    /// empty list means "treat the whole frame as damaged", which is
+    /// exactly this path's real, unavoidable behavior (only `copy`, never
+    /// `copy_with_damage`, is used here). Populated for real on the
+    /// `ext-image-copy-capture` path -- see `ext_capture.rs`.
+    pub damage_regions: Vec<DamageRect>,
 }
 
 /// Screencopy protocol state for wlr-screencopy-unstable-v1.
@@ -608,6 +619,7 @@ impl ScreencopyState {
                     height,
                     stride,
                     format_raw,
+                    damage_regions: Vec::new(),
                 };
                 if tx.send(frame).is_err() {
                     tracing::warn!(node_id, "Direct frame channel closed");

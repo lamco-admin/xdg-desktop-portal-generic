@@ -937,8 +937,16 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, u32> for WaylandState {
             ext_image_copy_capture_frame_v1::Event::Transform { .. } => {
                 tracing::trace!(node_id, "ext frame transform received");
             }
-            ext_image_copy_capture_frame_v1::Event::Damage { .. } => {
-                tracing::trace!(node_id, "ext frame damage received");
+            ext_image_copy_capture_frame_v1::Event::Damage {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                tracing::trace!(node_id, x, y, width, height, "ext frame damage received");
+                state
+                    .ext_capture
+                    .on_frame_damage(node_id, x, y, width, height);
             }
             ext_image_copy_capture_frame_v1::Event::PresentationTime { .. } => {
                 tracing::trace!(node_id, "ext frame presentation time received");
