@@ -222,7 +222,13 @@ impl ScreenshotInterface {
 /// Returns the file URI (e.g., `file:///tmp/xdp-screenshot-XXXX.png`).
 fn encode_and_save_png(data: &ScreenshotData) -> Result<String, String> {
     // Convert BGRx to RGBA
-    let rgba = convert_bgrx_to_rgba(&data.data, data.width, data.height, data.stride);
+    let rgba = convert_bgrx_to_rgba(
+        &data.data,
+        data.width,
+        data.height,
+        data.stride,
+        data.format_raw,
+    );
 
     // Create temp file
     let dir = std::env::temp_dir();
@@ -257,12 +263,21 @@ fn encode_and_save_png(data: &ScreenshotData) -> Result<String, String> {
     Ok(uri)
 }
 
-/// Convert `BGRx` (32-bit, blue-green-red-padding) pixel data to RGBA.
+/// Convert a captured 32-bit-per-pixel buffer to RGBA for PNG encoding.
 ///
-/// Most Wayland compositors provide SHM buffers in ARGB8888 or XRGB8888
-/// format (which in little-endian memory layout is `BGRx`). This function
-/// swaps the channels for PNG encoding.
-fn convert_bgrx_to_rgba(data: &[u8], width: u32, height: u32, stride: u32) -> Vec<u8> {
+/// The compositor's `wl_shm` buffer format determines the actual in-memory
+/// channel order (`format_raw`; see [`crate::types::wl_shm_format_needs_rb_swap`]
+/// for the full explanation) -- `argb8888`/`xrgb8888` land as `[B,G,R,X/A]`,
+/// `xbgr8888`/`abgr8888` (e.g. wlroots + virtio-gpu) land as `[R,G,B,X/A]`.
+/// Reading the wrong order here transposes red and blue in the output PNG.
+fn convert_bgrx_to_rgba(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    stride: u32,
+    format_raw: u32,
+) -> Vec<u8> {
+    let swap_rb = crate::types::wl_shm_format_needs_rb_swap(format_raw);
     let mut rgba = Vec::with_capacity((width * height * 4) as usize);
 
     for y in 0..height {
@@ -270,14 +285,21 @@ fn convert_bgrx_to_rgba(data: &[u8], width: u32, height: u32, stride: u32) -> Ve
         for x in 0..width {
             let pixel_offset = row_start + (x * 4) as usize;
             if pixel_offset + 3 < data.len() {
-                let b = data[pixel_offset];
+                let first = data[pixel_offset];
                 let g = data[pixel_offset + 1];
-                let r = data[pixel_offset + 2];
+                let third = data[pixel_offset + 2];
                 let a = data[pixel_offset + 3];
+                // Already-BGR-ordered input: first=B, third=R -> emit (third, g, first).
+                // RGB-ordered input (needs swap): first=R, third=B -> emit (first, g, third).
+                let (r, b) = if swap_rb {
+                    (first, third)
+                } else {
+                    (third, first)
+                };
                 rgba.push(r);
                 rgba.push(g);
                 rgba.push(b);
-                // Use alpha if available (ARGB8888), otherwise opaque (XRGB8888)
+                // Use alpha if available (ARGB8888/ABGR8888), otherwise opaque.
                 rgba.push(if a == 0 { 255 } else { a });
             } else {
                 rgba.extend_from_slice(&[0, 0, 0, 255]);
@@ -427,15 +449,15 @@ mod tests {
 
     #[test]
     fn test_convert_bgrx_to_rgba() {
-        // BGRx: B=0x10, G=0x20, R=0x30, X=0xFF
+        // BGRx (xrgb8888, format_raw=1): B=0x10, G=0x20, R=0x30, X=0xFF
         let bgrx = vec![0x10, 0x20, 0x30, 0xFF];
-        let rgba = convert_bgrx_to_rgba(&bgrx, 1, 1, 4);
+        let rgba = convert_bgrx_to_rgba(&bgrx, 1, 1, 4, 1);
         assert_eq!(rgba, vec![0x30, 0x20, 0x10, 0xFF]); // R, G, B, A
     }
 
     #[test]
     fn test_convert_bgrx_to_rgba_with_stride() {
-        // 2x1 image with stride=12 (8 bytes of pixels + 4 bytes padding)
+        // 2x1 image with stride=12 (8 bytes of pixels + 4 bytes padding), xrgb8888
         let mut bgrx = vec![0u8; 12];
         // Pixel (0,0): B=0xFF, G=0x00, R=0x00, X=0xFF (blue)
         bgrx[0] = 0xFF;
@@ -448,12 +470,24 @@ mod tests {
         bgrx[6] = 0x00;
         bgrx[7] = 0xFF;
 
-        let rgba = convert_bgrx_to_rgba(&bgrx, 2, 1, 12);
+        let rgba = convert_bgrx_to_rgba(&bgrx, 2, 1, 12, 1);
         assert_eq!(rgba.len(), 8);
         // Pixel 0: R=0, G=0, B=255, A=255
         assert_eq!(rgba[0..4], [0x00, 0x00, 0xFF, 0xFF]);
         // Pixel 1: R=0, G=255, B=0, A=255
         assert_eq!(rgba[4..8], [0x00, 0xFF, 0x00, 0xFF]);
+    }
+
+    #[test]
+    fn test_convert_rgbx_to_rgba_swaps_channels() {
+        // Regression test for the color-format bug: xbgr8888 (format_raw
+        // 0x34324258, e.g. wlroots + virtio-gpu) is RGBx in memory, not
+        // BGRx. Without consulting format_raw this pixel's red and blue
+        // were transposed in the output PNG.
+        // xbgr8888 in-memory: R=0x30, G=0x20, B=0x10, X=0xFF
+        let rgbx = vec![0x30, 0x20, 0x10, 0xFF];
+        let rgba = convert_bgrx_to_rgba(&rgbx, 1, 1, 4, 0x3432_4258);
+        assert_eq!(rgba, vec![0x30, 0x20, 0x10, 0xFF]); // R, G, B, A -- unswapped from source
     }
 
     #[test]

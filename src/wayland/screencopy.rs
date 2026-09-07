@@ -242,7 +242,8 @@ pub struct ActiveCapture {
 /// Raw frame data sent through the direct frame channel.
 #[derive(Debug, Clone)]
 pub struct RawFrame {
-    /// Pixel data.
+    /// Pixel data, in whatever channel order `format_raw` describes -- not
+    /// necessarily BGRx. See [`crate::types::wl_shm_format_needs_rb_swap`].
     pub data: Vec<u8>,
     /// Width in pixels.
     pub width: u32,
@@ -250,7 +251,12 @@ pub struct RawFrame {
     pub height: u32,
     /// Row stride in bytes.
     pub stride: u32,
-    /// SPA pixel format (raw u32).
+    /// `wl_shm` format (raw u32) -- NOT an SPA format, despite the field's
+    /// resemblance to one. This is the value from the `zwlr_screencopy_frame_v1`
+    /// `buffer` event's `wl_shm::Format`, cast to `u32`. A consumer that treats
+    /// it as an already-SPA value, or ignores it and assumes BGRx, gets the
+    /// wrong channel order on any compositor that doesn't deliver xrgb8888
+    /// (e.g. wlroots + virtio-gpu delivers xbgr8888).
     pub format_raw: u32,
 }
 

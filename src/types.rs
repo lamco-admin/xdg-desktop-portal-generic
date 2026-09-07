@@ -480,6 +480,50 @@ impl CursorMode {
     }
 }
 
+// === Pixel format normalization ===
+//
+// `wl_shm` format names describe channel order read as a big-endian 32-bit
+// int, which is the *reverse* of the actual little-endian in-memory byte
+// order. `xrgb8888`/`argb8888` land as [B,G,R,X]/[B,G,R,A] -- already the
+// crate's canonical BGRx/BGRA output order, no correction needed. But
+// `xbgr8888`/`abgr8888` land as [R,G,B,X]/[R,G,B,A] -- red and blue
+// transposed relative to BGRx/BGRA. Compositors deliver whichever format
+// their buffer allocator produces (e.g. wlroots + virtio-gpu emits
+// xbgr8888), so every capture consumer that assumes BGRx unconditionally
+// renders with red and blue swapped on those compositors.
+
+/// `wl_shm` format value for `xbgr8888` (in-memory `[R,G,B,X]`).
+const WL_SHM_FORMAT_XBGR8888: u32 = 0x3432_4258;
+/// `wl_shm` format value for `abgr8888` (in-memory `[R,G,B,A]`).
+const WL_SHM_FORMAT_ABGR8888: u32 = 0x3432_4241;
+
+/// Whether a captured buffer in this `wl_shm` format needs its red and blue
+/// channels swapped to reach the crate's canonical BGRx/BGRA output order.
+///
+/// Only `xbgr8888`/`abgr8888` need it; `argb8888`/`xrgb8888` are already
+/// correctly ordered. An unrecognized format is treated as already-correct
+/// rather than swapped speculatively -- it was going to be wrong either way,
+/// and guessing risks turning an already-correct format incorrect.
+pub fn wl_shm_format_needs_rb_swap(format_raw: u32) -> bool {
+    matches!(format_raw, WL_SHM_FORMAT_XBGR8888 | WL_SHM_FORMAT_ABGR8888)
+}
+
+/// Swap the red and blue byte positions in place for every 4-byte pixel in
+/// `data`, laid out with `stride` bytes per row and `height` rows (`width`
+/// pixels used per row; `stride` may exceed `width * 4` for row padding,
+/// which is left untouched).
+pub fn swap_rb_channels_in_place(data: &mut [u8], width: u32, height: u32, stride: u32) {
+    for y in 0..height {
+        let row_start = (y * stride) as usize;
+        for x in 0..width {
+            let px = row_start + (x * 4) as usize;
+            if px + 2 < data.len() {
+                data.swap(px, px + 2);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -622,5 +666,43 @@ mod tests {
         assert_eq!(CursorMode::from_bits(0x01), CursorMode::Hidden);
         assert_eq!(CursorMode::from_bits(0x02), CursorMode::Embedded);
         assert_eq!(CursorMode::from_bits(0x04), CursorMode::Metadata);
+    }
+
+    #[test]
+    fn test_wl_shm_format_needs_rb_swap() {
+        // argb8888 / xrgb8888: already BGR-ordered in memory, no swap.
+        assert!(!wl_shm_format_needs_rb_swap(0));
+        assert!(!wl_shm_format_needs_rb_swap(1));
+        // xbgr8888 / abgr8888: RGB-ordered in memory, needs swap.
+        assert!(wl_shm_format_needs_rb_swap(WL_SHM_FORMAT_XBGR8888));
+        assert!(wl_shm_format_needs_rb_swap(WL_SHM_FORMAT_ABGR8888));
+        // Unrecognized format: treated as already-correct, not swapped.
+        assert!(!wl_shm_format_needs_rb_swap(0xdead_beef));
+    }
+
+    #[test]
+    fn test_swap_rb_channels_in_place() {
+        // 2x1 image, no row padding (stride == width * 4).
+        // Pixel 0: R=10 G=20 B=30 X=40 (xbgr8888 in-memory order)
+        // Pixel 1: R=50 G=60 B=70 X=80
+        let mut data = vec![10, 20, 30, 40, 50, 60, 70, 80];
+        swap_rb_channels_in_place(&mut data, 2, 1, 8);
+        // After swap: B and R positions (0 and 2) exchanged per pixel.
+        assert_eq!(data, vec![30, 20, 10, 40, 70, 60, 50, 80]);
+    }
+
+    #[test]
+    fn test_swap_rb_channels_in_place_respects_stride_padding() {
+        // 1x2 image, 4 bytes of row padding after each 1-pixel (4-byte) row.
+        let mut data = vec![
+            10, 20, 30, 40, 0xff, 0xff, 0xff, 0xff, // row 0: pixel + padding
+            50, 60, 70, 80, 0xff, 0xff, 0xff, 0xff, // row 1: pixel + padding
+        ];
+        swap_rb_channels_in_place(&mut data, 1, 2, 8);
+        assert_eq!(data[0..4], [30, 20, 10, 40]);
+        assert_eq!(data[8..12], [70, 60, 50, 80]);
+        // Padding bytes must be untouched.
+        assert_eq!(data[4..8], [0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(data[12..16], [0xff, 0xff, 0xff, 0xff]);
     }
 }

@@ -3,7 +3,10 @@
 //! Each stream corresponds to one captured output. The stream is created as a
 //! PipeWire Video/Source node and connected with `ALLOC_BUFFERS` so PipeWire
 //! allocates the buffer pool. Frames are queued by copying screencopy data
-//! into dequeued buffers.
+//! into dequeued buffers, normalized to the stream's declared `BGRx` order
+//! (see [`PipeWireVideoStream::queue_frame`]) since the compositor may
+//! deliver a different in-memory byte order than what was captured at
+//! stream-creation time.
 
 use pipewire::{
     properties::properties,
@@ -242,13 +245,18 @@ impl PipeWireVideoStream {
     ///
     /// Dequeues a buffer from PipeWire, copies the frame data in, then
     /// the buffer is automatically queued back when dropped (RAII).
+    ///
+    /// The stream always advertises `BGRx` (see [`Self::build_video_format_pod`]);
+    /// `format` is the `wl_shm` format the compositor actually delivered, used
+    /// to normalize the copied bytes to that declared order when they differ
+    /// (e.g. `xbgr8888` on wlroots + virtio-gpu, which is RGBx in memory).
     pub fn queue_frame(
         &mut self,
         data: &[u8],
-        _width: u32,
+        width: u32,
         height: u32,
         stride: u32,
-        _format: u32,
+        format: u32,
     ) -> Result<(), PortalError> {
         // Dequeue a buffer from PipeWire
         let mut buffer = self.stream.dequeue_buffer().ok_or_else(|| {
@@ -269,6 +277,14 @@ impl PipeWireVideoStream {
         if let Some(dest_slice) = pw_data.data() {
             let copy_len = data.len().min(dest_slice.len());
             dest_slice[..copy_len].copy_from_slice(&data[..copy_len]);
+            if crate::types::wl_shm_format_needs_rb_swap(format) {
+                crate::types::swap_rb_channels_in_place(
+                    &mut dest_slice[..copy_len],
+                    width,
+                    height,
+                    stride,
+                );
+            }
         } else {
             return Err(PortalError::PipeWire(
                 "PipeWire buffer data not mapped".to_string(),
