@@ -250,7 +250,7 @@ impl InputBackend for UinputPointerBackend {
         1
     }
 
-    fn keysym_to_keycode(&self, _keysym: u32) -> Option<u32> {
+    fn keysym_to_keycode(&mut self, _keysym: u32) -> Option<u32> {
         None
     }
 

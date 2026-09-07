@@ -57,6 +57,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the path via `pkg-config --variable=systemduserunitdir systemd`, falling
   back to the standard `$(PREFIX)/lib/systemd/user` if pkg-config or
   `systemd.pc` aren't available.
+- **`ei_text.keysym` injection requests were silently dropped, and the
+  capability was never advertised in the first place.** `lamco-rdp-server`
+  already sends `ei_text.keysym()` for every RDP-side Unicode keyboard
+  character that has no direct evdev keycode (CJK, accented Latin, and
+  other non-ASCII input) — but on any wlroots-family compositor going
+  through this bridge, that request went nowhere: the `ei_text` device
+  capability was never negotiated, so the sending side's own guard silently
+  no-op'd. Net effect: typing or pasting non-ASCII Unicode through
+  `lamco-rdp-server` on Sway, Hyprland, or any other compositor answering
+  `ConnectToEIS` via this crate was a no-op. Now advertises
+  `DeviceCapability::Text` alongside `DeviceCapability::Keyboard`, and
+  `EisRequest::TextKeysym` resolves to a real keypress: `keysym_to_keycode`
+  (used by both the EIS path and `NotifyKeyboardKeysym`) now falls back to
+  a small LRU pool of dynamically-bound keycodes, layered on top of the
+  self-generated "us" XKB keymap via on-the-fly keymap text splicing and
+  re-upload, when a keysym has no keycode in the static base layout.
+  `EisRequest::TextUtf8` has no realization path yet (nothing sends it) and
+  is logged rather than silently dropped.
 
 ## [0.6.1] - 2026-08-26
 

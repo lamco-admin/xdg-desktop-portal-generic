@@ -536,6 +536,16 @@ fn device_types_to_capabilities(devices: DeviceTypes) -> BitFlags<DeviceCapabili
     }
     if devices.keyboard {
         caps |= DeviceCapability::Keyboard;
+        // ei_text rides on keyboard capability -- there's no separate
+        // DeviceTypes/D-Bus toggle for it, and the protocol only makes sense
+        // alongside a keyboard device. See EI-TEXT-SCOPING-2026-09-07.md in
+        // lamco-admin: EisBridgeBackend now resolves EisRequest::TextKeysym
+        // via a dynamically-extended wlr keymap (WlrInputBackend's
+        // DynamicKeysymPool). TextUtf8 has no realization path yet and is
+        // logged-and-dropped, but advertising Text is still correct: an
+        // ei_text.utf8-only sender is better served by a real (if partial)
+        // capability than by us silently pretending ei_text doesn't exist.
+        caps |= DeviceCapability::Text;
     }
     if devices.touchscreen {
         caps |= DeviceCapability::Touch;
@@ -557,6 +567,7 @@ mod tests {
         assert!(caps.contains(DeviceCapability::Touch));
         assert!(caps.contains(DeviceCapability::Button));
         assert!(caps.contains(DeviceCapability::Scroll));
+        assert!(caps.contains(DeviceCapability::Text));
     }
 
     #[test]
@@ -568,8 +579,22 @@ mod tests {
         };
         let caps = device_types_to_capabilities(kb);
         assert!(caps.contains(DeviceCapability::Keyboard));
+        // ei_text rides on keyboard capability -- see the fn's own comment.
+        assert!(caps.contains(DeviceCapability::Text));
         assert!(!caps.contains(DeviceCapability::Pointer));
         assert!(!caps.contains(DeviceCapability::Touch));
+    }
+
+    #[test]
+    fn test_device_types_no_keyboard_no_text() {
+        let pointer_only = DeviceTypes {
+            keyboard: false,
+            pointer: true,
+            touchscreen: false,
+        };
+        let caps = device_types_to_capabilities(pointer_only);
+        assert!(!caps.contains(DeviceCapability::Keyboard));
+        assert!(!caps.contains(DeviceCapability::Text));
     }
 
     #[test]

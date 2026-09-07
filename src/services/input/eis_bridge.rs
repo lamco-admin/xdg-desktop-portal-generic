@@ -224,9 +224,13 @@ impl EisBridgeBackend {
             // DeviceStart/StopEmulating carry health data harvested in
             // process_events(); DeviceClosed teardown and Ready/resumed
             // gating are also handled there. RequestDevice is sender-context
-            // lifecycle-only. TextKeysym/TextUtf8 (the libei 1.6 `ei_text`
-            // capability) are not forwarded yet -- text injection is a
-            // separate, unimplemented capability the bridge does not advertise.
+            // lifecycle-only. TextKeysym is also handled in process_events
+            // (resolving a keysym may need &mut self.wlr, unavailable to this
+            // pure function) -- reaching it here means it was already staged
+            // or logged there, so returning no additional event is correct,
+            // not a gap. TextUtf8 has no realization path yet (see
+            // EI-TEXT-SCOPING-2026-09-07.md in lamco-admin) and is logged in
+            // process_events rather than handled here.
             EisRequest::Disconnect
             | EisRequest::Bind(_)
             | EisRequest::Frame(_)
@@ -426,6 +430,63 @@ impl InputBackend for EisBridgeBackend {
                                 );
                                 closed.device.remove();
                             }
+                            // ei_text.keysym injection request (sender-context client
+                            // asking us to emulate a composed/Unicode keysym rather
+                            // than a raw ei_keyboard.key). Handled here rather than in
+                            // eis_request_to_input_event because resolving a keysym may
+                            // need to dynamically extend the wlr keymap, which needs
+                            // &mut self.wlr -- see EI-TEXT-SCOPING-2026-09-07.md in
+                            // lamco-admin for why this exists and what it fixes.
+                            EisRequest::TextKeysym(text_keysym) => {
+                                if session.is_receiver() {
+                                    tracing::warn!(
+                                        session_id = %session_id,
+                                        "Unexpected ei_text.keysym from receiver-context EIS \
+                                         session -- dropped"
+                                    );
+                                    continue;
+                                }
+                                match self.wlr.keysym_to_keycode(text_keysym.keysym) {
+                                    Some(keycode) => {
+                                        let state = match text_keysym.state {
+                                            reis::eis::keyboard::KeyState::Press => {
+                                                KeyState::Pressed
+                                            }
+                                            reis::eis::keyboard::KeyState::Released => {
+                                                KeyState::Released
+                                            }
+                                        };
+                                        self.pending_events
+                                            .entry(session_id.clone())
+                                            .or_default()
+                                            .push(InputEvent::Keyboard(KeyboardEvent {
+                                                keycode,
+                                                state,
+                                                time_usec: text_keysym.time,
+                                            }));
+                                    }
+                                    None => {
+                                        tracing::warn!(
+                                            session_id = %session_id,
+                                            keysym = text_keysym.keysym,
+                                            "No keycode available for ei_text.keysym -- dropped"
+                                        );
+                                    }
+                                }
+                            }
+                            // ei_text.utf8: no realization path yet (would need
+                            // decomposing into a sequence of per-codepoint keysym
+                            // binds). Nothing sends this today -- lamco-rdp-server
+                            // only ever sends TextKeysym -- so this is a deliberate
+                            // scope boundary, not an oversight. Logged rather than
+                            // silently dropped so a future real sender is visible.
+                            EisRequest::TextUtf8(text_utf8) => {
+                                tracing::warn!(
+                                    session_id = %session_id,
+                                    len = text_utf8.text.len(),
+                                    "ei_text.utf8 received but not yet supported -- dropped"
+                                );
+                            }
                             _ => {}
                         }
 
@@ -488,7 +549,7 @@ impl InputBackend for EisBridgeBackend {
         self.sessions.len()
     }
 
-    fn keysym_to_keycode(&self, keysym: u32) -> Option<u32> {
+    fn keysym_to_keycode(&mut self, keysym: u32) -> Option<u32> {
         // Delegate to wlr backend's XKB keymap
         self.wlr.keysym_to_keycode(keysym)
     }

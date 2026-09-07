@@ -154,8 +154,15 @@ pub trait InputBackend: Send + Sync {
 
     /// Convert an XKB keysym to an evdev keycode.
     ///
-    /// Used by `NotifyKeyboardKeysym` to translate keysyms into keycodes
-    /// that can be sent through the virtual keyboard protocol.
+    /// Used by `NotifyKeyboardKeysym` and by `EisRequest::TextKeysym`
+    /// (ei_text.keysym injection) to translate keysyms into keycodes that
+    /// can be sent through the virtual keyboard protocol.
+    ///
+    /// Takes `&mut self`: when the keysym has no keycode in the backend's
+    /// static base layout, an implementation may dynamically extend its
+    /// keymap to cover it (see `WlrInputBackend`'s `DynamicKeysymPool`) --
+    /// which mutates backend state and may re-upload the keymap to active
+    /// sessions.
     ///
     /// # Arguments
     ///
@@ -164,8 +171,9 @@ pub trait InputBackend: Send + Sync {
     /// # Returns
     ///
     /// * `Some(keycode)` - The evdev keycode (minus the XKB offset of 8)
-    /// * `None` - No keycode produces this keysym in the current keymap
-    fn keysym_to_keycode(&self, keysym: u32) -> Option<u32>;
+    /// * `None` - No keycode is available for this keysym (e.g. dynamic
+    ///   extension is unsupported by this backend, or failed)
+    fn keysym_to_keycode(&mut self, keysym: u32) -> Option<u32>;
 
     /// Set the mapping from PipeWire stream node IDs to output geometry.
     ///

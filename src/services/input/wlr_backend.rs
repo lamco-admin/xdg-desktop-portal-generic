@@ -12,7 +12,8 @@
 //! 4. Input events are sent through the virtual devices
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
+    fmt::Write as _,
     os::unix::io::{AsFd, OwnedFd},
 };
 
@@ -56,7 +57,156 @@ struct XkbData {
     /// modifier mask sent to virtual-keyboard `modifiers()` reflects the
     /// current depressed/latched/locked set.
     state: xkbcommon::xkb::State,
+    /// Serialized form of `keymap` — the *currently active* keymap text,
+    /// uploaded to every session's virtual keyboard. Changes whenever
+    /// `dynamic_pool`'s bindings change (see [`WlrInputBackend::keysym_to_keycode`]).
     keymap_string: String,
+    /// The original "us"-layout keymap text, as compiled at startup — never
+    /// mutated. [`splice_dynamic_keysyms`] always splices from this, not from
+    /// a previous splice, so re-splicing is idempotent rather than compounding.
+    base_keymap_string: String,
+    /// `base_keymap`'s own maximum keycode, i.e. where the dynamic pool's
+    /// reserved keycode range starts (`base_max_keycode + 1 ..=
+    /// base_max_keycode + DYNAMIC_KEYSYM_POOL_SIZE`).
+    base_max_keycode: u32,
+    /// LRU pool of keycodes dynamically bound to whatever keysyms the base
+    /// "us" layout has no key for (CJK, accented Latin, and other non-ASCII
+    /// characters — see `EI-TEXT-SCOPING-2026-09-07.md` in lamco-admin).
+    dynamic_pool: DynamicKeysymPool,
+}
+
+/// Number of keycodes reserved above the base keymap's own maximum for
+/// dynamic keysym binding. Small on purpose: each slot only needs to live
+/// long enough to be pressed and released (typically within the same EIS
+/// frame), so a modest LRU pool comfortably covers realistic typing/paste
+/// bursts without the keymap churning on every distinct character seen
+/// over a session's lifetime.
+const DYNAMIC_KEYSYM_POOL_SIZE: usize = 32;
+
+/// LRU pool of dynamically-bound keycodes, layered on top of a base XKB
+/// keymap via [`splice_dynamic_keysyms`]. Reserves [`DYNAMIC_KEYSYM_POOL_SIZE`]
+/// keycode numbers above the base keymap's own maximum and rebinds them on
+/// demand to whatever keysym is currently needed, evicting the
+/// least-recently-used slot when the pool is full so a keymap re-upload
+/// (and the `keyboard.keymap()` event it costs every connected session) only
+/// happens when a binding actually changes, not on every already-resident
+/// keysym.
+#[derive(Debug, Clone)]
+struct DynamicKeysymPool {
+    /// Keysym currently bound to each pool slot, by slot index. `None` means
+    /// the slot has never been used (bound to `NoSymbol` in the keymap).
+    slots: [Option<u32>; DYNAMIC_KEYSYM_POOL_SIZE],
+    /// Slot indices in least- to most-recently-used order. Always a
+    /// permutation of `0..DYNAMIC_KEYSYM_POOL_SIZE`.
+    recency: VecDeque<usize>,
+}
+
+impl DynamicKeysymPool {
+    fn new() -> Self {
+        Self {
+            slots: [None; DYNAMIC_KEYSYM_POOL_SIZE],
+            recency: (0..DYNAMIC_KEYSYM_POOL_SIZE).collect(),
+        }
+    }
+
+    /// Resolve `keysym` to a pool slot index, reusing an existing binding
+    /// when present. The second element of the return value is whether the
+    /// pool's bindings changed as a result (i.e. whether the keymap needs
+    /// recompiling and re-uploading) — `false` on a cache hit.
+    fn resolve(&mut self, keysym: u32) -> (usize, bool) {
+        if let Some(slot) = self.slots.iter().position(|s| *s == Some(keysym)) {
+            self.touch(slot);
+            return (slot, false);
+        }
+
+        #[expect(
+            clippy::expect_used,
+            reason = "recency is constructed with exactly DYNAMIC_KEYSYM_POOL_SIZE slots and \
+                      only ever removed/re-pushed as a whole, never shrunk"
+        )]
+        let slot = self
+            .recency
+            .pop_front()
+            .expect("recency holds all DYNAMIC_KEYSYM_POOL_SIZE slots");
+        self.slots[slot] = Some(keysym);
+        self.recency.push_back(slot);
+        (slot, true)
+    }
+
+    fn touch(&mut self, slot: usize) {
+        if let Some(pos) = self.recency.iter().position(|&s| s == slot) {
+            self.recency.remove(pos);
+        }
+        self.recency.push_back(slot);
+    }
+}
+
+/// Splice `pool`'s current keysym bindings into `base_keymap`, producing a
+/// keymap text with [`DYNAMIC_KEYSYM_POOL_SIZE`] extra keycodes appended
+/// above `base_max_keycode`, each bound to whatever keysym its pool slot
+/// currently holds (`NoSymbol` for an unused slot).
+///
+/// `base_keymap` must be libxkbcommon's own `KEYMAP_FORMAT_TEXT_V1` output
+/// (i.e. [`xkbcommon::xkb::Keymap::get_as_string`]) — this relies on that
+/// format's deterministic section structure (one `xkb_keycodes`/`xkb_types`/
+/// `xkb_compatibility`/`xkb_symbols` block each, every one closed by a `};`
+/// line on its own, the whole keymap closed by one more such line) to find
+/// safe splice points without a full XKB parser. Verified directly against a
+/// real compiled "us" keymap (recompiles cleanly via
+/// `Keymap::new_from_string`, spliced keycodes resolve to the expected
+/// keysyms, pre-existing keys are untouched) — see the module tests below.
+fn splice_dynamic_keysyms(
+    base_keymap: &str,
+    base_max_keycode: u32,
+    pool: &DynamicKeysymPool,
+) -> Option<String> {
+    let new_max = base_max_keycode + DYNAMIC_KEYSYM_POOL_SIZE as u32;
+
+    // xkb_keycodes: raise the declared maximum, then append one `<LDXn> =
+    // <keycode>;` line per pool slot just before that section's closing `};`.
+    let old_max_decl = format!("maximum = {base_max_keycode};");
+    let new_max_decl = format!("maximum = {new_max};");
+    let with_new_max = base_keymap.replacen(&old_max_decl, &new_max_decl, 1);
+    if with_new_max == base_keymap {
+        tracing::error!(
+            "splice_dynamic_keysyms: base keymap has no \"{old_max_decl}\" declaration -- \
+             base_max_keycode is stale or the keymap format changed"
+        );
+        return None;
+    }
+
+    let keycodes_close = with_new_max.find("\n};\n")?;
+    let mut keycode_lines = String::new();
+    for i in 0..DYNAMIC_KEYSYM_POOL_SIZE {
+        let keycode = base_max_keycode + 1 + i as u32;
+        let _ = writeln!(keycode_lines, "\t<LDX{i}> = {keycode};");
+    }
+    let split_at = keycodes_close + 1; // keep the section's own leading '\n'
+    let (before, after) = with_new_max.split_at(split_at);
+    let with_keycodes = format!("{before}{keycode_lines}{after}");
+
+    // xkb_symbols: the section closes are the last two "\n};\n" occurrences
+    // in the file (xkb_symbols itself, then the outer xkb_keymap block) --
+    // insert one `key <LDXn> { [ ... ] };` line per slot just before the
+    // second-to-last one.
+    let closes: Vec<usize> = with_keycodes
+        .match_indices("\n};\n")
+        .map(|(i, _)| i)
+        .collect();
+    let symbols_close_idx = closes.len().checked_sub(2)?;
+    let symbols_close = closes[symbols_close_idx];
+
+    let mut symbol_lines = String::new();
+    for (i, slot) in pool.slots.iter().enumerate() {
+        let sym = match slot {
+            Some(keysym) => format!("0x{keysym:08x}"),
+            None => "NoSymbol".to_string(),
+        };
+        let _ = writeln!(symbol_lines, "\tkey <LDX{i}> {{ [ {sym} ] }};");
+    }
+    let split_at = symbols_close + 1;
+    let (before, after) = with_keycodes.split_at(split_at);
+    Some(format!("{before}{symbol_lines}{after}"))
 }
 
 // SAFETY: xkbcommon Keymap and State are internally reference-counted and
@@ -215,17 +365,22 @@ impl WlrInputBackend {
         })?;
 
         let keymap_string = keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1);
+        let base_max_keycode = keymap.max_keycode().raw();
         let xkb_state = xkb::State::new(&keymap);
 
         tracing::info!(
-            "XKB keymap initialized (default us layout, {} bytes)",
-            keymap_string.len()
+            "XKB keymap initialized (default us layout, {} bytes, max keycode {})",
+            keymap_string.len(),
+            base_max_keycode
         );
 
         state.xkb = Some(XkbData {
             keymap,
             state: xkb_state,
+            base_keymap_string: keymap_string.clone(),
             keymap_string,
+            base_max_keycode,
+            dynamic_pool: DynamicKeysymPool::new(),
         });
 
         Ok(())
@@ -652,6 +807,29 @@ impl WlrInputBackend {
             }
         }
     }
+
+    /// Search `keymap` for a keycode that already produces `keysym` at level
+    /// 0 (unshifted) of layout 0 — i.e. without needing the dynamic pool.
+    fn static_keysym_to_keycode(keymap: &xkbcommon::xkb::Keymap, keysym: u32) -> Option<u32> {
+        use xkbcommon::xkb;
+
+        for keycode in keymap.min_keycode().raw()..=keymap.max_keycode().raw() {
+            let xkb_keycode = xkb::Keycode::new(keycode);
+            let num_levels = keymap.num_levels_for_key(xkb_keycode, 0);
+
+            for level in 0..num_levels {
+                let syms = keymap.key_get_syms_by_level(xkb_keycode, 0, level);
+                for sym in syms {
+                    if sym.raw() == keysym {
+                        // XKB keycodes are evdev keycodes + 8
+                        return Some(keycode - 8);
+                    }
+                }
+            }
+        }
+
+        None
+    }
 }
 
 impl InputBackend for WlrInputBackend {
@@ -755,31 +933,80 @@ impl InputBackend for WlrInputBackend {
         self.sessions.len()
     }
 
-    fn keysym_to_keycode(&self, keysym: u32) -> Option<u32> {
+    fn keysym_to_keycode(&mut self, keysym: u32) -> Option<u32> {
         use xkbcommon::xkb;
 
-        let xkb_data = self.state.xkb.as_ref()?;
-        let keymap = &xkb_data.keymap;
+        // Fast path: the keysym already has a keycode in the base "us"
+        // layout (the common case -- ASCII/Latin characters). Doesn't touch
+        // the dynamic pool, so it never costs a keymap re-upload.
+        if let Some(keycode) =
+            Self::static_keysym_to_keycode(&self.state.xkb.as_ref()?.keymap, keysym)
+        {
+            return Some(keycode);
+        }
 
-        // Iterate all keycodes in the keymap to find one that produces
-        // the requested keysym at level 0 (unshifted) of layout 0.
-        for keycode in keymap.min_keycode().raw()..=keymap.max_keycode().raw() {
-            let xkb_keycode = xkb::Keycode::new(keycode);
-            let num_levels = keymap.num_levels_for_key(xkb_keycode, 0);
+        // Fallback: dynamically bind a pool keycode to this keysym. Covers
+        // CJK, accented Latin, and any other character the base layout has
+        // no key for -- see EI-TEXT-SCOPING-2026-09-07.md in lamco-admin
+        // (`~/lamco-admin/projects/xdg-desktop-portal-generic/`).
+        let xkb_data = self.state.xkb.as_mut()?;
+        let (slot, changed) = xkb_data.dynamic_pool.resolve(keysym);
+        let keycode_xkb = xkb_data.base_max_keycode + 1 + slot as u32;
 
-            for level in 0..num_levels {
-                let syms = keymap.key_get_syms_by_level(xkb_keycode, 0, level);
-                for sym in syms {
-                    if sym.raw() == keysym {
-                        // XKB keycodes are evdev keycodes + 8
-                        return Some(keycode - 8);
-                    }
+        if changed {
+            let Some(spliced) = splice_dynamic_keysyms(
+                &xkb_data.base_keymap_string,
+                xkb_data.base_max_keycode,
+                &xkb_data.dynamic_pool,
+            ) else {
+                tracing::error!(keysym, "Failed to splice dynamic keysym into keymap text");
+                return None;
+            };
+
+            let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+            let Some(new_keymap) = xkb::Keymap::new_from_string(
+                &context,
+                spliced.clone(),
+                xkb::KEYMAP_FORMAT_TEXT_V1,
+                xkb::KEYMAP_COMPILE_NO_FLAGS,
+            ) else {
+                tracing::error!(
+                    keysym,
+                    "Spliced keymap failed to recompile; keeping prior keymap"
+                );
+                return None;
+            };
+
+            xkb_data.state = xkb::State::new(&new_keymap);
+            xkb_data.keymap = new_keymap;
+            xkb_data.keymap_string = spliced;
+
+            tracing::debug!(
+                keysym,
+                keycode = keycode_xkb - 8,
+                "Dynamically bound keycode for keysym; re-uploading keymap to active sessions"
+            );
+
+            // xkb_data's borrow ends here (last use above); re-borrow self
+            // to reach `sessions` and `flush()`.
+            let keymap_string = self.state.xkb.as_ref()?.keymap_string.clone();
+            for ctx in self.sessions.values() {
+                if let Some(ref keyboard) = ctx.keyboard
+                    && let Err(e) = Self::set_keyboard_keymap(keyboard, &keymap_string)
+                {
+                    tracing::warn!(
+                        error = %e,
+                        "Failed to re-upload extended keymap to a session's keyboard"
+                    );
                 }
+            }
+            if let Err(e) = self.flush() {
+                tracing::warn!(error = %e, "Failed to flush after keymap re-upload");
             }
         }
 
-        tracing::warn!(keysym = keysym, "No keycode found for keysym");
-        None
+        // XKB keycodes are evdev keycodes + 8 (same convention the static path uses).
+        Some(keycode_xkb - 8)
     }
 
     fn set_health_sender(&mut self, tx: crate::health::HealthSender) {
@@ -915,6 +1142,114 @@ mod tests {
             xkb.keymap_string.starts_with("xkb_keymap"),
             "Keymap string should start with 'xkb_keymap'"
         );
+        assert_eq!(xkb.base_keymap_string, xkb.keymap_string);
+        assert_eq!(xkb.base_max_keycode, xkb.keymap.max_keycode().raw());
+    }
+
+    #[test]
+    fn test_dynamic_keysym_pool_reuses_existing_binding() {
+        let mut pool = DynamicKeysymPool::new();
+        let (slot_a, changed_a) = pool.resolve(0x0100_30AB);
+        assert!(changed_a);
+        let (slot_a_again, changed_again) = pool.resolve(0x0100_30AB);
+        assert_eq!(slot_a, slot_a_again);
+        assert!(
+            !changed_again,
+            "resolving the same keysym twice must not re-change the pool"
+        );
+    }
+
+    #[test]
+    fn test_dynamic_keysym_pool_evicts_lru_when_full() {
+        let mut pool = DynamicKeysymPool::new();
+        // Fill every slot with a distinct keysym.
+        let mut slots = Vec::new();
+        for i in 0..DYNAMIC_KEYSYM_POOL_SIZE {
+            let (slot, changed) = pool.resolve(0x0100_0000 + i as u32);
+            assert!(changed);
+            slots.push(slot);
+        }
+        // Touch keysym 0 so it's most-recently-used, keysym 1 stays least-recently-used.
+        pool.resolve(0x0100_0000);
+        // A brand-new keysym must evict slot 1 (the LRU one), not slot 0.
+        let (evicted_slot, changed) = pool.resolve(0x0100_0000 + DYNAMIC_KEYSYM_POOL_SIZE as u32);
+        assert!(changed);
+        assert_eq!(evicted_slot, slots[1]);
+        // The evicted keysym (0x0100_0001) must no longer resolve to a cache hit.
+        let (_, changed_after_eviction) = pool.resolve(0x0100_0001);
+        assert!(changed_after_eviction);
+    }
+
+    #[test]
+    fn test_splice_dynamic_keysyms_recompiles_and_resolves() {
+        use xkbcommon::xkb;
+
+        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+        let base_keymap = xkb::Keymap::new_from_names(
+            &context,
+            "",
+            "",
+            "",
+            "",
+            None,
+            xkb::KEYMAP_COMPILE_NO_FLAGS,
+        )
+        .expect("compile base keymap");
+        let base_max = base_keymap.max_keycode().raw();
+        let base_text = base_keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1);
+
+        // Two keysyms with no keycode anywhere in a plain "us" layout:
+        // Katakana KA (U+30AB) and Latin small e-acute (U+00E9).
+        let mut pool = DynamicKeysymPool::new();
+        pool.resolve(0x0100_30AB);
+        pool.resolve(0x0100_00E9);
+
+        let spliced =
+            splice_dynamic_keysyms(&base_text, base_max, &pool).expect("splice should succeed");
+
+        let new_keymap = xkb::Keymap::new_from_string(
+            &context,
+            spliced,
+            xkb::KEYMAP_FORMAT_TEXT_V1,
+            xkb::KEYMAP_COMPILE_NO_FLAGS,
+        )
+        .expect("spliced keymap must recompile");
+
+        assert_eq!(
+            new_keymap.max_keycode().raw(),
+            base_max + DYNAMIC_KEYSYM_POOL_SIZE as u32
+        );
+
+        // Both dynamically-bound keycodes resolve to the expected keysym.
+        for (i, expected) in [(0usize, 0x0100_30AB_u32), (1, 0x0100_00E9)] {
+            let keycode = xkb::Keycode::new(base_max + 1 + i as u32);
+            let syms = new_keymap.key_get_syms_by_level(keycode, 0, 0);
+            assert!(
+                syms.iter().any(|s| s.raw() == expected),
+                "slot {i} should resolve to keysym 0x{expected:08x}, got {syms:x?}"
+            );
+        }
+
+        // A base-layout key (AC01 = 'a', keycode 38) must be untouched by the splice.
+        let a_key = xkb::Keycode::new(38);
+        let a_syms = new_keymap.key_get_syms_by_level(a_key, 0, 0);
+        assert!(
+            a_syms.iter().any(|s| s.raw() == 0x61),
+            "base 'a' key must still resolve"
+        );
+    }
+
+    #[test]
+    fn test_splice_dynamic_keysyms_stale_base_max_fails_closed() {
+        let pool = DynamicKeysymPool::new();
+        // A `base_keymap` with no "maximum = 999;" declaration at all --
+        // simulates a caller passing a stale/wrong base_max_keycode.
+        let result = splice_dynamic_keysyms(
+            "xkb_keymap { xkb_keycodes \"x\" { maximum = 5; };\n};\n",
+            999,
+            &pool,
+        );
+        assert!(result.is_none());
     }
 
     #[test]
