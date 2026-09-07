@@ -246,7 +246,7 @@ impl PipeWireVideoStream {
     /// Dequeues a buffer from PipeWire, copies the frame data in, then
     /// the buffer is automatically queued back when dropped (RAII).
     ///
-    /// The stream always advertises `BGRx` (see [`Self::build_video_format_pod`]);
+    /// The stream always advertises `BGRx` (see `build_video_format_pod`);
     /// `format` is the `wl_shm` format the compositor actually delivered, used
     /// to normalize the copied bytes to that declared order when they differ
     /// (e.g. `xbgr8888` on wlroots + virtio-gpu, which is RGBx in memory).
