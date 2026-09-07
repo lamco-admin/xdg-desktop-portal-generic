@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.7.0] - 2026-09-07
 
-### Breaking changes
+### Breaking
 
 - **`SourceInfo` gained public `x`/`y` fields.** All of its fields are
   public with no `#[non_exhaustive]`, so this is a breaking change for
