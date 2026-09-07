@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-09-07
+
+### Breaking changes
+
+- **`SourceInfo` gained public `x`/`y` fields.** All of its fields are
+  public with no `#[non_exhaustive]`, so this is a breaking change for
+  any external code constructing `SourceInfo` by struct literal (reading
+  its fields, or constructing via the crate's own APIs, is unaffected).
+  Bumping the minor version per this project's 0.x SemVer convention
+  rather than treating it as a patch.
+
+### Fixed
+
+- **Multi-monitor output enumeration collapsed every output to the first
+  one's name, mode, and position.** The startup `wl_output` binding loop
+  used `GlobalList::bind()`, which is designed for singleton globals
+  (`wl_compositor`, `wl_seat`, ...) and always binds the *first* global
+  matching an interface — looped over N outputs, it silently rebound the
+  same first-found output N times. Each `OutputInfo` still got the right
+  `global_name`, but every Wayland event describing the output (name,
+  mode, geometry) came from that one real output, so all sources reported
+  identical name/dimensions and every capture stream but the first
+  allocated the wrong buffer size for its actual target. Fixed by binding
+  each `wl_output` global individually by its registry name via
+  `WlRegistry::bind()`, matching the pattern the hotplug path already
+  used correctly.
+- **`SourceInfo` carried no position at all.** Even with the binding fix
+  above, every source reported (0, 0) — there was nowhere to put a real
+  position. Added `x`/`y` fields to `SourceInfo`, populated from
+  `OutputInfo` (which already tracked them from `wl_output.geometry`).
+- **Captured pixel data was not normalized to the format it was declared
+  as, causing red/blue channel swaps on compositors that don't deliver
+  `xrgb8888`.** Both the PipeWire output path (`src/pipewire/stream.rs`,
+  which always advertises `BGRx`) and the screenshot PNG encoder
+  (`src/dbus/screenshot.rs`) copied captured buffers through unconditionally,
+  ignoring the actual `wl_shm` format the compositor delivered. On
+  `wlroots + virtio-gpu` (and any other compositor emitting `xbgr8888`/
+  `abgr8888`), the true in-memory byte order is RGBx/RGBA, not BGRx/BGRA —
+  e.g. Breeze attention-blue `#3daee9` rendered as `#e9ae3d` (golden brown).
+  Added `wl_shm_format_needs_rb_swap`/`swap_rb_channels_in_place` (`src/types.rs`)
+  and wired both paths to normalize red/blue when the source format needs it.
+  Also fixed `RawFrame::format_raw`'s doc comment, which claimed it was an
+  SPA format when it's actually the raw `wl_shm::Format` value.
+- **systemd user unit installed to a path `systemctl --user` never searches.**
+  The Makefile installed to `$(LIBEXECDIR)/systemd/user`
+  (`/usr/libexec/systemd/user`), which is not one of the search paths
+  `systemd.unit(5)` documents — the unit was silently invisible to
+  `systemctl --user`. D-Bus activation (the separately-installed `.service`
+  file) worked regardless, which is why this went unnoticed. Now resolves
+  the path via `pkg-config --variable=systemduserunitdir systemd`, falling
+  back to the standard `$(PREFIX)/lib/systemd/user` if pkg-config or
+  `systemd.pc` aren't available.
+
 ## [0.6.1] - 2026-08-26
 
 ### Fixed
