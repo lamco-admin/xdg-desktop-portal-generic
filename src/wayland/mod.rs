@@ -539,13 +539,15 @@ impl WaylandConnection {
         // === Outputs and protocol detection ===
         // Scan all globals to detect protocols and bind outputs
         let contents = globals.contents();
-        let mut output_names = Vec::new();
+        // (name, version) per wl_output global, not just name -- each output can
+        // in principle advertise a different version, and binding needs both.
+        let mut outputs_to_bind: Vec<(u32, u32)> = Vec::new();
 
         contents.with_list(|global_list| {
             for global in global_list {
                 match global.interface.as_str() {
                     "wl_output" => {
-                        output_names.push(global.name);
+                        outputs_to_bind.push((global.name, global.version));
                     }
                     "ext_image_copy_capture_manager_v1" => {
                         protocols.ext_image_copy_capture = true;
@@ -568,23 +570,33 @@ impl WaylandConnection {
             }
         });
 
-        protocols.output_count = output_names.len() as u32;
+        protocols.output_count = outputs_to_bind.len() as u32;
 
-        // Bind wl_output globals
-        for name in &output_names {
+        // Bind each wl_output global individually by its registry name.
+        //
+        // GlobalList::bind() (used everywhere else in this function) always binds
+        // the FIRST global matching an interface -- it's designed for singletons
+        // (wl_compositor, wl_seat, wl_shm), not for binding N distinct globals of
+        // the same interface. Looping it here, as this code used to, silently
+        // rebound the *same* first-found output on every iteration: N proxies and
+        // N distinct `OutputInfo.global_name` values, but every wl_output event
+        // (name/mode/geometry) all N proxies received described that one real
+        // output. That's issue #70 -- multi-monitor setups got every output's
+        // SourceInfo populated with the first output's name, mode and position.
+        //
+        // WlRegistry::bind(name, version, qh, udata) binds a *specific* global by
+        // its numeric registry name -- the hotplug path below (Event::Global on
+        // WlRegistry) already uses exactly this, correctly. Do the same here.
+        let registry = globals.registry();
+        for (name, version) in &outputs_to_bind {
             let info = Arc::new(Mutex::new(OutputInfo {
                 global_name: *name,
                 ..Default::default()
             }));
 
-            match globals.bind::<WlOutput, _, _>(qh, 1..=4, info.clone()) {
-                Ok(output) => {
-                    state.outputs.push((output, info));
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to bind wl_output {}: {}", name, e);
-                }
-            }
+            let bind_version = (*version).min(4);
+            let output: WlOutput = registry.bind(*name, bind_version, qh, info.clone());
+            state.outputs.push((output, info));
         }
 
         protocols

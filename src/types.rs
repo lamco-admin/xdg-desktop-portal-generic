@@ -21,6 +21,10 @@ pub struct SourceInfo {
     pub height: u32,
     /// Refresh rate in millihertz.
     pub refresh_rate: u32,
+    /// Position x, in the compositor's global (layout) coordinate space.
+    pub x: i32,
+    /// Position y, in the compositor's global (layout) coordinate space.
+    pub y: i32,
     /// Source type.
     pub source_type: SourceType,
 }

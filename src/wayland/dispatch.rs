@@ -117,6 +117,8 @@ impl OutputInfo {
             width: self.width,
             height: self.height,
             refresh_rate: self.refresh,
+            x: self.x,
+            y: self.y,
             source_type: crate::types::SourceType::Monitor,
         }
     }
@@ -1165,6 +1167,8 @@ mod tests {
             width: 1920,
             height: 1080,
             refresh: 60000,
+            x: 1920,
+            y: 588,
             done: true,
             ..Default::default()
         };
@@ -1176,6 +1180,53 @@ mod tests {
         assert_eq!(source.width, 1920);
         assert_eq!(source.height, 1080);
         assert_eq!(source.refresh_rate, 60000);
+        // Position must survive the conversion (issue #70: SourceInfo used to have
+        // no position fields at all, so every output reported (0, 0) regardless of
+        // its actual compositor-layout position).
+        assert_eq!(source.x, 1920);
+        assert_eq!(source.y, 588);
+    }
+
+    #[test]
+    fn test_two_outputs_get_distinct_source_info() {
+        // Regression test for issue #70: two OutputInfo records for two real,
+        // distinct outputs must convert to two SourceInfos that actually differ
+        // -- proving nothing downstream of OutputInfo collapses them back
+        // together. This doesn't cover the actual root cause (the startup
+        // binding loop rebinding the same wl_output for every global_name,
+        // fixed in WaylandConnection::detect_and_bind_globals) since that needs
+        // a live compositor connection; it guards the data-shape half of the
+        // bug, which is testable in isolation.
+        let first = OutputInfo {
+            global_name: 53,
+            name: Some("DP-3".to_string()),
+            width: 2560,
+            height: 1440,
+            refresh: 120000,
+            x: 4480,
+            y: 0,
+            done: true,
+            ..Default::default()
+        };
+        let second = OutputInfo {
+            global_name: 54,
+            name: Some("DP-1".to_string()),
+            width: 3440,
+            height: 1440,
+            refresh: 120000,
+            x: 5920,
+            y: 588,
+            done: true,
+            ..Default::default()
+        };
+
+        let a = first.to_source_info();
+        let b = second.to_source_info();
+
+        assert_ne!(a.id, b.id);
+        assert_ne!(a.name, b.name);
+        assert_ne!(a.width, b.width);
+        assert_ne!((a.x, a.y), (b.x, b.y));
     }
 
     #[test]
