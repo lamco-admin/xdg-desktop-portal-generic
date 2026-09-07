@@ -6,7 +6,7 @@ lockfile; refresh with `cargo about generate about.hbs --all-features`.)
 
 ## Overview
 
-- MIT License: 140 crate(s)
+- MIT License: 143 crate(s)
 - Unicode License v3: 1 crate(s)
 
 ---
@@ -114,7 +114,7 @@ SOFTWARE.
 
 Used by:
 - cfg-if 1.0.4
-- socket2 0.6.4
+- socket2 0.6.5
 
 ```
 Copyright (c) 2014 Alex Crichton
@@ -150,7 +150,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- mio 1.2.1
+- mio 1.2.3
 
 ```
 Copyright (c) 2014 Carl Lerche and other MIO contributors
@@ -216,9 +216,9 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- bitflags 2.13.0
-- log 0.4.32
-- regex-automata 0.4.14
+- bitflags 2.13.1
+- log 0.4.34
+- regex-automata 0.4.18
 - regex-syntax 0.8.11
 
 ```
@@ -255,7 +255,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- uuid 1.23.3
+- uuid 1.26.0
 
 ```
 Copyright (c) 2014 The Rust Project Developers
@@ -323,7 +323,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- flate2 1.1.9
+- flate2 1.1.10
 
 ```
 Copyright (c) 2014-2026 Alex Crichton
@@ -359,12 +359,12 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- wayland-backend 0.3.15
-- wayland-client 0.31.14
+- wayland-backend 0.3.17
+- wayland-client 0.31.15
 - wayland-protocols-misc 0.3.12
 - wayland-protocols-wlr 0.3.12
-- wayland-protocols 0.32.12
-- wayland-scanner 0.31.10
+- wayland-protocols 0.32.13
+- wayland-scanner 0.31.11
 - wayland-sys 0.31.11
 
 ```
@@ -467,15 +467,15 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- futures-channel 0.3.32
-- futures-core 0.3.32
-- futures-executor 0.3.32
-- futures-io 0.3.32
-- futures-macro 0.3.32
-- futures-sink 0.3.32
-- futures-task 0.3.32
-- futures-util 0.3.32
-- futures 0.3.32
+- futures-channel 0.3.34
+- futures-core 0.3.34
+- futures-executor 0.3.34
+- futures-io 0.3.34
+- futures-macro 0.3.34
+- futures-sink 0.3.34
+- futures-task 0.3.34
+- futures-util 0.3.34
+- futures 0.3.34
 
 ```
 Copyright (c) 2016 Alex Crichton
@@ -587,7 +587,7 @@ Used by:
 - lock_api 0.4.14
 - parking_lot 0.12.5
 - parking_lot_core 0.9.12
-- thread_local 1.1.9
+- thread_local 1.1.10
 
 ```
 Copyright (c) 2016 The Rust Project Developers
@@ -623,7 +623,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- indexmap 2.14.0
+- indexmap 2.14.2
 
 ```
 Copyright (c) 2016--2017
@@ -901,7 +901,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- bytes 1.12.0
+- bytes 1.12.1
 
 ```
 Copyright (c) 2018 Carl Lerche
@@ -937,7 +937,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- smallvec 1.15.2
+- smallvec 1.16.0
 
 ```
 Copyright (c) 2018 The Servo Project Developers
@@ -1182,7 +1182,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- memmap2 0.9.10
+- memmap2 0.9.11
 
 ```
 Copyright (c) 2020 Yevhenii Reizner
@@ -1249,11 +1249,11 @@ SOFTWARE.
 ## MIT License
 
 Used by:
-- zbus 5.16.0
-- zbus_macros 5.16.0
-- zbus_names 4.3.2
-- zvariant 5.12.0
-- zvariant_derive 5.12.0
+- zbus 5.19.0
+- zbus_macros 5.19.0
+- zbus_names 4.3.4
+- zvariant 5.15.0
+- zvariant_derive 5.15.0
 
 ```
 Copyright (c) 2024 Zeeshan Ali Khan & zbus contributors
@@ -1289,9 +1289,45 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
+- zcheapstr 1.1.0
+
+```
+Copyright (c) 2026 Zeeshan Ali Khan & zcheapstr contributors
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+```
+
+---
+
+## MIT License
+
+Used by:
 - toml_datetime 1.1.1+spec-1.1.0
-- toml_edit 0.25.12+spec-1.1.0
-- toml_parser 1.1.2+spec-1.1.0
+- toml_edit 0.25.13+spec-1.1.0
+- toml_parser 1.1.3+spec-1.1.0
 
 ```
 Copyright (c) Individual contributors
@@ -1321,7 +1357,7 @@ SOFTWARE.
 ## MIT License
 
 Used by:
-- libc 0.2.186
+- libc 0.2.189
 
 ```
 Copyright (c) The Rust Project Developers
@@ -1357,10 +1393,10 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- libspa-sys 0.10.0
-- libspa 0.10.0
-- pipewire-sys 0.10.0
-- pipewire 0.10.0
+- libspa-sys 0.10.1
+- libspa 0.10.1
+- pipewire-sys 0.10.1
+- pipewire 0.10.1
 
 ```
 Copyright The pipewire-rs Contributors.
@@ -1423,7 +1459,7 @@ SOFTWARE.
 ## MIT License
 
 Used by:
-- crc32fast 1.5.0
+- crc32fast 1.5.1
 
 ```
 MIT License
@@ -1455,7 +1491,7 @@ SOFTWARE.
 ## MIT License
 
 Used by:
-- bitvec 1.0.1
+- bitvec 1.1.1
 - wyz 0.5.1
 
 ```
@@ -1488,7 +1524,7 @@ SOFTWARE.
 ## MIT License
 
 Used by:
-- tokio-macros 2.7.0
+- tokio-macros 2.7.2
 
 ```
 MIT License
@@ -1585,7 +1621,7 @@ SOFTWARE.
 ## MIT License
 
 Used by:
-- xdg-desktop-portal-generic 0.5.0
+- xdg-desktop-portal-generic 0.7.0
 
 ```
 MIT License
@@ -1649,7 +1685,7 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- tokio 1.52.3
+- tokio 1.53.1
 
 ```
 MIT License
@@ -1681,7 +1717,7 @@ SOFTWARE.
 ## MIT License
 
 Used by:
-- simd-adler32 0.3.9
+- simd-adler32 0.3.10
 
 ```
 MIT License
@@ -1714,6 +1750,7 @@ SOFTWARE.
 
 Used by:
 - miniz_oxide 0.8.9
+- miniz_oxide 0.9.1
 
 ```
 MIT License
@@ -1819,7 +1856,7 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 - adler2 2.0.1
-- anyhow 1.0.102
+- anyhow 1.0.104
 - async-channel 2.5.0
 - async-executor 1.14.0
 - async-io 2.6.0
@@ -1827,17 +1864,17 @@ Used by:
 - async-process 2.5.0
 - async-signal 0.2.14
 - async-task 4.7.1
-- async-trait 0.1.89
+- async-trait 0.1.92
 - atomic-waker 1.1.2
-- blocking 1.6.2
+- blocking 1.7.0
 - concurrent-queue 2.5.0
 - endi 1.1.1
 - evdev 0.13.2
 - event-listener-strategy 0.5.4
-- event-listener 5.4.1
-- fastrand 2.4.1
+- event-listener 5.4.2
+- fastrand 2.5.0
 - futures-lite 2.6.1
-- hermit-abi 0.5.2
+- hermit-abi 0.5.3
 - linux-raw-sys 0.12.1
 - once_cell 1.21.4
 - ordered-stream 0.2.0
@@ -1846,20 +1883,21 @@ Used by:
 - piper 0.2.5
 - polling 3.11.0
 - proc-macro-crate 3.5.0
-- proc-macro2 1.0.106
-- quote 1.0.45
-- reis 0.7.0
+- proc-macro2 1.0.107
+- quote 1.0.47
+- reis 0.7.1
 - rustix 1.1.4
-- serde 1.0.228
-- serde_core 1.0.228
-- serde_derive 1.0.228
-- serde_repr 0.1.20
-- syn 2.0.118
-- thiserror-impl 2.0.18
-- thiserror 2.0.18
+- serde 1.0.229
+- serde_core 1.0.229
+- serde_derive 1.0.229
+- serde_repr 0.1.21
+- syn 2.0.119
+- syn 3.0.5
+- thiserror-impl 2.0.20
+- thiserror 2.0.20
 - unicode-ident 1.0.24
 - wasi 0.11.1+wasi-snapshot-preview1
-- zvariant_utils 3.4.0
+- zvariant_utils 4.2.0
 
 ```
 Permission is hereby granted, free of charge, to any
@@ -1893,7 +1931,7 @@ DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- winnow 1.0.3
+- winnow 1.0.4
 
 ```
 Permission is hereby granted, free of charge, to any person obtaining
@@ -1922,7 +1960,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- memchr 2.8.2
+- memchr 2.8.3
 
 ```
 The MIT License (MIT)
@@ -1987,7 +2025,7 @@ THE SOFTWARE.
 ## MIT License
 
 Used by:
-- crossbeam-utils 0.8.21
+- crossbeam-utils 0.8.23
 
 ```
 The MIT License (MIT)
@@ -2090,7 +2128,7 @@ SOFTWARE.
 ## MIT License
 
 Used by:
-- quick-xml 0.39.4
+- quick-xml 0.41.0
 
 ```
 The MIT License (MIT)
