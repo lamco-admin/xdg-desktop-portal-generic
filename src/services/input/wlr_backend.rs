@@ -991,13 +991,13 @@ impl InputBackend for WlrInputBackend {
             // to reach `sessions` and `flush()`.
             let keymap_string = self.state.xkb.as_ref()?.keymap_string.clone();
             for ctx in self.sessions.values() {
-                if let Some(ref keyboard) = ctx.keyboard
-                    && let Err(e) = Self::set_keyboard_keymap(keyboard, &keymap_string)
-                {
-                    tracing::warn!(
-                        error = %e,
-                        "Failed to re-upload extended keymap to a session's keyboard"
-                    );
+                if let Some(ref keyboard) = ctx.keyboard {
+                    if let Err(e) = Self::set_keyboard_keymap(keyboard, &keymap_string) {
+                        tracing::warn!(
+                            error = %e,
+                            "Failed to re-upload extended keymap to a session's keyboard"
+                        );
+                    }
                 }
             }
             if let Err(e) = self.flush() {

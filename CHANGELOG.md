@@ -89,6 +89,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-upload, when a keysym has no keycode in the static base layout.
   `EisRequest::TextUtf8` has no realization path yet (nothing sends it) and
   is logged rather than silently dropped.
+- **MSRV (Rust 1.87) build broken by a let-chain.** The keymap re-upload
+  loop added above used `if let ... && let ...`, a Rust 1.88 feature — one
+  minor version past this crate's declared MSRV. Passed every local check
+  because local verification only built against the ambient toolchain
+  (newer than MSRV); only caught by CI's separate `msrv` job, which stayed
+  red across two pushes before being noticed. Un-chained into nested
+  `if let`. Local verification now also builds against the pinned MSRV
+  toolchain directly, not just the ambient one.
 
 ## [0.6.1] - 2026-08-26
 
