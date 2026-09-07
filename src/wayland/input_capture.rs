@@ -12,6 +12,11 @@
 //! active (`zwlr_layer_surface_v1`'s dynamic `keyboard_interactivity`) and
 //! computes `cursor_position` from the barrier surface's known
 //! compositor-global origin plus the accumulated pointer offset (Phase 2c).
+//! Additionally, when `zwp_text_input_v3` is bound, enables a per-surface
+//! text-input object for as long as it holds keyboard focus and forwards
+//! any real input method's composed `commit_string` as
+//! [`InputCaptureActivationEvent::Text`] -- a bonus on top of the raw
+//! per-keystroke forwarding above, never a requirement for it.
 
 use std::{collections::HashMap, os::unix::io::OwnedFd};
 
@@ -19,8 +24,8 @@ use tokio::sync::mpsc::UnboundedSender;
 use wayland_client::{
     QueueHandle,
     protocol::{
-        wl_compositor::WlCompositor, wl_output::WlOutput, wl_pointer::WlPointer, wl_shm::WlShm,
-        wl_surface::WlSurface,
+        wl_compositor::WlCompositor, wl_output::WlOutput, wl_pointer::WlPointer, wl_seat::WlSeat,
+        wl_shm::WlShm, wl_surface::WlSurface,
     },
 };
 use wayland_protocols::wp::{
@@ -31,6 +36,9 @@ use wayland_protocols::wp::{
     relative_pointer::zv1::client::{
         zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
         zwp_relative_pointer_v1::ZwpRelativePointerV1,
+    },
+    text_input::zv3::client::{
+        zwp_text_input_manager_v3::ZwpTextInputManagerV3, zwp_text_input_v3::ZwpTextInputV3,
     },
 };
 use wayland_protocols_wlr::layer_shell::v1::client::{
@@ -107,6 +115,19 @@ pub enum InputCaptureActivationEvent {
         barrier_id: u32,
         /// Compositor-global cursor position at deactivation, if known.
         cursor_position: Option<(f64, f64)>,
+    },
+    /// A real input method (fcitx, ibus, or the compositor's own compose-key
+    /// handling) composed and committed text while a lock is active
+    /// (`zwp_text_input_v3.commit_string`, applied at `done`). Additive to
+    /// `Key` -- raw keystrokes are still forwarded individually regardless;
+    /// this only fires when a real IME produces a final commit. Never
+    /// carries `preedit_string` (live, uncommitted composition) -- only
+    /// text the input method itself considers final.
+    Text {
+        /// Session handle (as a string).
+        session_id: String,
+        /// The committed text, UTF-8.
+        text: String,
     },
 }
 
@@ -297,6 +318,45 @@ pub struct BarrierSurface {
     /// `wl_pointer.Enter`'s surface-local coordinates plus `origin`, then
     /// accumulated by each relative-motion sample while locked.
     pub last_cursor_position: Option<(f64, f64)>,
+    /// Live `zwp_text_input_v3` object, present only while this surface
+    /// holds real keyboard focus and `text_input_manager` is bound (see
+    /// [`InputCaptureBarrierState::on_keyboard_enter`]).
+    pub text_input: Option<ZwpTextInputV3>,
+    /// `commit_string` text buffered since the last `done` -- per spec,
+    /// `commit_string`/`preedit_string`/`delete_surrounding_text` are
+    /// double-buffered state, only applied on `done`.
+    pub text_commit_buffer: TextCommitBuffer,
+}
+
+/// Buffers `zwp_text_input_v3.commit_string` text until the matching
+/// `done`, per the protocol's double-buffered state model (state is
+/// replaced wholesale by each `commit_string`, then only takes effect once
+/// `done` arrives). Pure logic, independent of any live Wayland object, so
+/// it's unit-testable without a compositor.
+#[derive(Default, Debug)]
+pub struct TextCommitBuffer {
+    pending: Option<String>,
+}
+
+impl TextCommitBuffer {
+    /// Handle `commit_string`: replace the buffered text.
+    pub fn on_commit_string(&mut self, text: Option<String>) {
+        self.pending = text;
+    }
+
+    /// Handle `done`: take and return the buffered text, if any and
+    /// non-empty (an empty `commit_string` clears any preedit but commits
+    /// nothing -- never worth reporting as captured text).
+    pub fn on_done(&mut self) -> Option<String> {
+        let text = self.pending.take()?;
+        if text.is_empty() { None } else { Some(text) }
+    }
+
+    /// Discard any buffered text without applying it (surface/text-input
+    /// teardown).
+    pub fn clear(&mut self) {
+        self.pending = None;
+    }
 }
 
 impl std::fmt::Debug for BarrierSurface {
@@ -324,6 +384,11 @@ pub struct InputCaptureBarrierState {
     pub compositor: Option<WlCompositor>,
     /// `wl_shm`, used to allocate each barrier surface's (transparent) buffer.
     pub shm: Option<WlShm>,
+    /// `zwp-text-input-manager-v3`. Optional -- composed-text delivery is a
+    /// bonus on top of Phase 2's raw keystroke forwarding, never a
+    /// requirement for barrier surfaces to function (see
+    /// [`super::globals::AvailableProtocols::wp_text_input`]).
+    pub text_input_manager: Option<ZwpTextInputManagerV3>,
     /// Live barrier surfaces, keyed by `(session_id, barrier_id)`.
     pub surfaces: HashMap<(String, u32), BarrierSurface>,
     /// Sender for activation-lifecycle events, consumed by the async
@@ -428,6 +493,8 @@ impl InputCaptureBarrierState {
                     grab_keyboard,
                     origin: geometry.origin,
                     last_cursor_position: None,
+                    text_input: None,
+                    text_commit_buffer: TextCommitBuffer::default(),
                 },
             );
         }
@@ -500,6 +567,7 @@ impl InputCaptureBarrierState {
     pub fn on_closed(&mut self, session_id: &str, barrier_id: u32) {
         if let Some(mut surface) = self.surfaces.remove(&(session_id.to_string(), barrier_id)) {
             destroy_lock_objects_mut(&mut surface);
+            destroy_text_input_mut(&mut surface);
             tracing::warn!(
                 session_id = %session_id,
                 barrier_id,
@@ -520,6 +588,7 @@ impl InputCaptureBarrierState {
         for key in keys {
             if let Some(mut surface) = self.surfaces.remove(&key) {
                 destroy_lock_objects_mut(&mut surface);
+                destroy_text_input_mut(&mut surface);
                 surface.layer_surface.destroy();
                 surface.wl_surface.destroy();
             }
@@ -547,6 +616,15 @@ impl InputCaptureBarrierState {
         self.surfaces
             .values()
             .find(|s| s.wl_surface == *surface)
+            .map(|s| (s.session_id.clone(), s.barrier_id))
+    }
+
+    /// Find the barrier surface owning a `zwp_text_input_v3` object, by
+    /// object identity (events carry no other correlating data).
+    fn find_barrier_by_text_input(&self, text_input: &ZwpTextInputV3) -> Option<(String, u32)> {
+        self.surfaces
+            .values()
+            .find(|s| s.text_input.as_ref() == Some(text_input))
             .map(|s| (s.session_id.clone(), s.barrier_id))
     }
 
@@ -704,14 +782,80 @@ impl InputCaptureBarrierState {
     }
 
     /// Handle `wl_keyboard.Enter`: this barrier surface now holds real
-    /// keyboard focus.
-    pub fn on_keyboard_enter(&mut self, surface: &WlSurface) {
+    /// keyboard focus. If a text-input manager is bound, also creates
+    /// (once per surface) and enables a `zwp_text_input_v3` object so a
+    /// real input method can start composing -- see
+    /// [`InputCaptureActivationEvent::Text`].
+    pub fn on_keyboard_enter(
+        &mut self,
+        qh: &QueueHandle<WaylandState>,
+        seat: Option<&WlSeat>,
+        surface: &WlSurface,
+    ) {
         self.keyboard_focus = self.find_barrier_by_surface(surface);
+        let Some(key) = self.keyboard_focus.clone() else {
+            return;
+        };
+        let (Some(manager), Some(seat)) = (&self.text_input_manager, seat) else {
+            return;
+        };
+        let Some(barrier_surface) = self.surfaces.get_mut(&key) else {
+            return;
+        };
+        if barrier_surface.text_input.is_some() {
+            return;
+        }
+        let text_input = manager.get_text_input(seat, qh, ());
+        text_input.enable();
+        text_input.commit();
+        barrier_surface.text_input = Some(text_input);
     }
 
     /// Handle `wl_keyboard.Leave`: keyboard focus left our surfaces.
+    /// Disables and destroys any live `zwp_text_input_v3` on the surface
+    /// that held focus -- composed text only makes sense while we
+    /// genuinely hold keyboard focus.
     pub fn on_keyboard_leave(&mut self) {
-        self.keyboard_focus = None;
+        if let Some(key) = self.keyboard_focus.take() {
+            if let Some(barrier_surface) = self.surfaces.get_mut(&key) {
+                destroy_text_input_mut(barrier_surface);
+            }
+        }
+    }
+
+    /// Handle `zwp_text_input_v3.commit_string`: buffer the text (per spec,
+    /// double-buffered state applied only on the following `done`).
+    pub fn on_text_input_commit_string(
+        &mut self,
+        text_input: &ZwpTextInputV3,
+        text: Option<String>,
+    ) {
+        let Some(key) = self.find_barrier_by_text_input(text_input) else {
+            return;
+        };
+        if let Some(barrier_surface) = self.surfaces.get_mut(&key) {
+            barrier_surface.text_commit_buffer.on_commit_string(text);
+        }
+    }
+
+    /// Handle `zwp_text_input_v3.done`: apply any buffered `commit_string`
+    /// text by reporting it to the async bridge. `preedit_string` and
+    /// `delete_surrounding_text` are deliberately never buffered (see the
+    /// module-level design notes) so there's nothing else to apply here.
+    pub fn on_text_input_done(&mut self, text_input: &ZwpTextInputV3) {
+        let Some(key) = self.find_barrier_by_text_input(text_input) else {
+            return;
+        };
+        let Some(barrier_surface) = self.surfaces.get_mut(&key) else {
+            return;
+        };
+        let Some(text) = barrier_surface.text_commit_buffer.on_done() else {
+            return;
+        };
+        self.send_activation_event(InputCaptureActivationEvent::Text {
+            session_id: key.0,
+            text,
+        });
     }
 
     /// Handle `wl_keyboard.Key` while a barrier surface holds focus.
@@ -775,9 +919,69 @@ fn destroy_lock_objects_mut(surface: &mut BarrierSurface) {
     }
 }
 
+/// Disable and destroy a barrier surface's live `zwp_text_input_v3` object,
+/// if any, discarding any not-yet-applied buffered `commit_string` text.
+fn destroy_text_input_mut(surface: &mut BarrierSurface) {
+    surface.text_commit_buffer.clear();
+    if let Some(text_input) = surface.text_input.take() {
+        text_input.disable();
+        text_input.commit();
+        text_input.destroy();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_text_commit_buffer_done_without_commit_yields_nothing() {
+        let mut buf = TextCommitBuffer::default();
+        assert_eq!(buf.on_done(), None);
+    }
+
+    #[test]
+    fn test_text_commit_buffer_applies_on_done() {
+        let mut buf = TextCommitBuffer::default();
+        buf.on_commit_string(Some("hello".to_string()));
+        assert_eq!(buf.on_done(), Some("hello".to_string()));
+        // Applied exactly once -- a second done with nothing new pending
+        // yields nothing.
+        assert_eq!(buf.on_done(), None);
+    }
+
+    #[test]
+    fn test_text_commit_buffer_empty_commit_string_yields_nothing() {
+        let mut buf = TextCommitBuffer::default();
+        buf.on_commit_string(Some(String::new()));
+        assert_eq!(buf.on_done(), None);
+    }
+
+    #[test]
+    fn test_text_commit_buffer_none_commit_string_yields_nothing() {
+        // commit_string's text arg is nullable in the protocol.
+        let mut buf = TextCommitBuffer::default();
+        buf.on_commit_string(None);
+        assert_eq!(buf.on_done(), None);
+    }
+
+    #[test]
+    fn test_text_commit_buffer_later_commit_replaces_earlier_one() {
+        // Double-buffered per spec: only the latest commit_string before a
+        // done is applied, not an accumulation of every commit_string seen.
+        let mut buf = TextCommitBuffer::default();
+        buf.on_commit_string(Some("first".to_string()));
+        buf.on_commit_string(Some("second".to_string()));
+        assert_eq!(buf.on_done(), Some("second".to_string()));
+    }
+
+    #[test]
+    fn test_text_commit_buffer_clear_discards_pending() {
+        let mut buf = TextCommitBuffer::default();
+        buf.on_commit_string(Some("discarded".to_string()));
+        buf.clear();
+        assert_eq!(buf.on_done(), None);
+    }
 
     fn zone(x: i32, y: i32, width: u32, height: u32) -> InputCaptureZone {
         InputCaptureZone {

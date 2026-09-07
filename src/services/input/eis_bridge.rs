@@ -617,6 +617,13 @@ impl InputBackend for EisBridgeBackend {
             .send_modifiers(depressed, latched, locked, group)
     }
 
+    fn forward_captured_text(&mut self, session_id: &str, text: &str) -> Result<()> {
+        self.sessions
+            .get_mut(session_id)
+            .ok_or_else(|| PortalError::SessionNotFound(session_id.to_string()))?
+            .send_text_utf8(text)
+    }
+
     fn set_shared_wayland_state(
         &mut self,
         state: Arc<std::sync::Mutex<crate::wayland::SharedWaylandState>>,

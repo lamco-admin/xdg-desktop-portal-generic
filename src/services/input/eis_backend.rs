@@ -523,6 +523,96 @@ impl EisSession {
         let _ = self.context.flush();
         Ok(())
     }
+
+    /// Send composed text (a real input method's already-committed output)
+    /// to the client as one or more `ei_text.utf8` requests.
+    ///
+    /// `zwp_text_input_v3.commit_string` allows up to 4000 bytes, but
+    /// `ei_text.utf8` is protocol-capped at 254 bytes (255 with the
+    /// terminator) -- `text` is chunked on UTF-8 character boundaries
+    /// (never splitting a multi-byte codepoint) into as many `.utf8()`
+    /// requests as needed, all within a single `ei_device.frame()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PortalError::InvalidState` if the session isn't an active
+    /// Receiver-context session, or the device has no keyboard interface
+    /// (`ei_text` rides on keyboard capability -- see
+    /// `device_types_to_capabilities`).
+    pub fn send_text_utf8(&mut self, text: &str) -> Result<()> {
+        let SessionPhase::ActiveReceiver { device, .. } = &self.phase else {
+            return Err(PortalError::InvalidState {
+                expected: "receiver-context EIS session, active".to_string(),
+                actual: "session not in an active receiver phase".to_string(),
+            });
+        };
+        let Some(ei_text) = device.interface::<eis::Text>() else {
+            return Err(PortalError::InvalidState {
+                expected: "device with keyboard capability bound".to_string(),
+                actual: "device has no ei_text interface".to_string(),
+            });
+        };
+        for chunk in chunk_utf8(text, EI_TEXT_MAX_BYTES) {
+            ei_text.utf8(chunk);
+        }
+        // One frame covering every chunk of this single commit -- matches
+        // send_key's "one hardware event, one frame" batching. There's no
+        // hardware timestamp for composed text (it's synthesized by an
+        // input method, not tied to a physical key event), so this reads
+        // the clock directly rather than threading a caller-supplied one
+        // through, same as `current_time_usec` in `dbus/remote_desktop.rs`.
+        device.frame(current_time_usec());
+        let _ = self.context.flush();
+        Ok(())
+    }
+}
+
+/// `ei_text.utf8`'s wire cap: 255 bytes including the NUL terminator, so
+/// 254 usable bytes per request.
+const EI_TEXT_MAX_BYTES: usize = 254;
+
+/// Current `CLOCK_MONOTONIC` time in microseconds, matching the clock
+/// `ei_device.frame` timestamps are specified against.
+#[expect(
+    clippy::cast_sign_loss,
+    reason = "CLOCK_MONOTONIC tv_sec and tv_nsec are always non-negative"
+)]
+fn current_time_usec() -> u64 {
+    use nix::time::{ClockId, clock_gettime};
+    match clock_gettime(ClockId::CLOCK_MONOTONIC) {
+        Ok(ts) => ts.tv_sec() as u64 * 1_000_000 + ts.tv_nsec() as u64 / 1_000,
+        Err(_) => 0,
+    }
+}
+
+/// Split `text` into chunks of at most `max_bytes` UTF-8 bytes each,
+/// never splitting a multi-byte codepoint. Empty input yields no chunks.
+fn chunk_utf8(text: &str, max_bytes: usize) -> Vec<&str> {
+    let mut chunks = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        if rest.len() <= max_bytes {
+            chunks.push(rest);
+            break;
+        }
+        // Find the largest char-boundary split point at or before max_bytes.
+        let mut split = max_bytes;
+        while split > 0 && !rest.is_char_boundary(split) {
+            split -= 1;
+        }
+        if split == 0 {
+            // max_bytes is smaller than the first remaining codepoint's own
+            // width -- still make progress by taking that one codepoint
+            // whole (it will exceed max_bytes on its own; this only
+            // happens if max_bytes is set below 4, which EI_TEXT_MAX_BYTES
+            // never is).
+            split = rest.chars().next().map_or(1, char::len_utf8);
+        }
+        let (chunk, remainder) = rest.split_at(split);
+        chunks.push(chunk);
+        rest = remainder;
+    }
+    chunks
 }
 
 /// Convert our `DeviceTypes` to reis `DeviceCapability` bitflags.
@@ -620,5 +710,64 @@ mod tests {
         assert!(session.send_pointer_motion(1.0, 2.0, 0).is_err());
         assert!(session.send_key(30, true, 0).is_err());
         assert!(session.send_modifiers(0, 0, 0, 0).is_err());
+        assert!(session.send_text_utf8("hello").is_err());
+    }
+
+    #[test]
+    fn test_chunk_utf8_empty_yields_no_chunks() {
+        assert!(chunk_utf8("", 254).is_empty());
+    }
+
+    #[test]
+    fn test_chunk_utf8_short_text_single_chunk() {
+        let chunks = chunk_utf8("hello", 254);
+        assert_eq!(chunks, vec!["hello"]);
+    }
+
+    #[test]
+    fn test_chunk_utf8_splits_on_byte_limit() {
+        let text = "a".repeat(300);
+        let chunks = chunk_utf8(&text, 254);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].len(), 254);
+        assert_eq!(chunks[1].len(), 46);
+        assert_eq!(chunks.concat(), text);
+    }
+
+    #[test]
+    fn test_chunk_utf8_never_splits_a_multibyte_codepoint() {
+        // Each 'é' is 2 bytes -- a naive byte-offset split at an odd
+        // max_bytes would land inside one, corrupting the UTF-8 stream.
+        let text = "é".repeat(200);
+        assert_eq!(text.len(), 400);
+        for max_bytes in [3, 4, 5, 253, 254, 255] {
+            let chunks = chunk_utf8(&text, max_bytes);
+            for chunk in &chunks {
+                assert!(
+                    std::str::from_utf8(chunk.as_bytes()).is_ok(),
+                    "chunk boundary split a codepoint at max_bytes={max_bytes}"
+                );
+                assert!(chunk.len() <= max_bytes);
+            }
+            assert_eq!(chunks.concat(), text);
+        }
+    }
+
+    #[test]
+    fn test_chunk_utf8_makes_progress_when_max_bytes_below_codepoint_width() {
+        // Pathological input (never reached via EI_TEXT_MAX_BYTES=254, but
+        // must not infinite-loop): a single codepoint wider than the cap
+        // is still emitted whole rather than corrupted or stalling.
+        let text = "é";
+        let chunks = chunk_utf8(text, 1);
+        assert_eq!(chunks, vec!["é"]);
+    }
+
+    #[test]
+    fn test_chunk_utf8_exact_multiple_of_max_bytes() {
+        let text = "a".repeat(254 * 2);
+        let chunks = chunk_utf8(&text, 254);
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks.iter().all(|c| c.len() == 254));
     }
 }

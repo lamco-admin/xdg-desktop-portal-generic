@@ -694,99 +694,120 @@ impl PortalBackend {
             wayland::InputCaptureActivationEvent,
         >,
     ) {
-        use wayland::InputCaptureActivationEvent;
-
         tracing::info!("InputCapture activation bridge started");
 
         while let Some(event) = activation_rx.recv().await {
-            match event {
-                InputCaptureActivationEvent::Activated {
+            Self::dispatch_input_capture_activation_event(
+                &connection,
+                &session_manager,
+                &input_backend,
+                event,
+            )
+            .await;
+        }
+    }
+
+    /// Handle one activation-lifecycle event from the Wayland thread's
+    /// barrier lock/relative-motion/text-input handling. Split out of
+    /// [`Self::input_capture_activation_bridge`]'s loop so each stays under
+    /// the line-count lint on its own.
+    async fn dispatch_input_capture_activation_event(
+        connection: &zbus::Connection,
+        session_manager: &Arc<Mutex<SessionManager>>,
+        input_backend: &Arc<Mutex<Box<dyn InputBackend>>>,
+        event: wayland::InputCaptureActivationEvent,
+    ) {
+        use wayland::InputCaptureActivationEvent;
+
+        match event {
+            InputCaptureActivationEvent::Activated {
+                session_id,
+                barrier_id,
+                cursor_position,
+            } => {
+                Self::handle_input_capture_activated(
+                    connection,
+                    session_manager,
+                    input_backend,
                     session_id,
                     barrier_id,
                     cursor_position,
-                } => {
-                    Self::handle_input_capture_activated(
-                        &connection,
-                        &session_manager,
-                        &input_backend,
-                        session_id,
-                        barrier_id,
-                        cursor_position,
-                    )
-                    .await;
-                }
-                InputCaptureActivationEvent::Motion {
-                    session_id,
-                    dx,
-                    dy,
-                    time_usec,
-                } => {
-                    let mut backend = input_backend.lock().await;
-                    if let Err(e) =
-                        backend.forward_captured_pointer_motion(&session_id, dx, dy, time_usec)
-                    {
-                        tracing::warn!(
-                            session_id = %session_id,
-                            error = %e,
-                            "Failed to forward captured pointer motion"
-                        );
-                    }
-                }
-                InputCaptureActivationEvent::Key {
-                    session_id,
-                    keycode,
-                    pressed,
-                    time_usec,
-                } => {
-                    let mut backend = input_backend.lock().await;
-                    if let Err(e) =
-                        backend.forward_captured_key(&session_id, keycode, pressed, time_usec)
-                    {
-                        tracing::warn!(
-                            session_id = %session_id,
-                            error = %e,
-                            "Failed to forward captured key event"
-                        );
-                    }
-                }
-                InputCaptureActivationEvent::Modifiers {
-                    session_id,
+                )
+                .await;
+            }
+            InputCaptureActivationEvent::Motion {
+                session_id,
+                dx,
+                dy,
+                time_usec,
+            } => {
+                let mut backend = input_backend.lock().await;
+                let result =
+                    backend.forward_captured_pointer_motion(&session_id, dx, dy, time_usec);
+                Self::log_forward_error(&session_id, "pointer motion", result);
+            }
+            InputCaptureActivationEvent::Key {
+                session_id,
+                keycode,
+                pressed,
+                time_usec,
+            } => {
+                let mut backend = input_backend.lock().await;
+                let result = backend.forward_captured_key(&session_id, keycode, pressed, time_usec);
+                Self::log_forward_error(&session_id, "key event", result);
+            }
+            InputCaptureActivationEvent::Modifiers {
+                session_id,
+                depressed,
+                latched,
+                locked,
+                group,
+            } => {
+                let mut backend = input_backend.lock().await;
+                let result = backend.forward_captured_modifiers(
+                    &session_id,
                     depressed,
                     latched,
                     locked,
                     group,
-                } => {
-                    let mut backend = input_backend.lock().await;
-                    if let Err(e) = backend.forward_captured_modifiers(
-                        &session_id,
-                        depressed,
-                        latched,
-                        locked,
-                        group,
-                    ) {
-                        tracing::warn!(
-                            session_id = %session_id,
-                            error = %e,
-                            "Failed to forward captured modifiers"
-                        );
-                    }
-                }
-                InputCaptureActivationEvent::Deactivated {
+                );
+                Self::log_forward_error(&session_id, "modifiers", result);
+            }
+            InputCaptureActivationEvent::Deactivated {
+                session_id,
+                barrier_id,
+                cursor_position,
+            } => {
+                Self::handle_input_capture_deactivated(
+                    connection,
+                    session_manager,
+                    input_backend,
                     session_id,
                     barrier_id,
                     cursor_position,
-                } => {
-                    Self::handle_input_capture_deactivated(
-                        &connection,
-                        &session_manager,
-                        &input_backend,
-                        session_id,
-                        barrier_id,
-                        cursor_position,
-                    )
-                    .await;
-                }
+                )
+                .await;
             }
+            InputCaptureActivationEvent::Text { session_id, text } => {
+                let mut backend = input_backend.lock().await;
+                let result = backend.forward_captured_text(&session_id, &text);
+                Self::log_forward_error(&session_id, "composed text", result);
+            }
+        }
+    }
+
+    /// Log a warning if forwarding a captured InputCapture event failed.
+    /// Shared by every simple forward-and-log arm in
+    /// [`Self::dispatch_input_capture_activation_event`] to keep that
+    /// function's line count down.
+    fn log_forward_error(session_id: &str, what: &str, result: Result<()>) {
+        if let Err(e) = result {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %e,
+                what,
+                "Failed to forward captured input event"
+            );
         }
     }
 

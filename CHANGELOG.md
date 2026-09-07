@@ -16,6 +16,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Bumping the minor version per this project's 0.x SemVer convention
   rather than treating it as a patch.
 
+### Added
+
+- **`InputCapture` now delivers composed text from a real input method
+  during an active capture, not just raw keystrokes.** Built ahead of any
+  actual consumer (`lamco-rdp-server-dev` doesn't consume `InputCapture`
+  yet) so this side is complete when one exists. When `zwp_text_input_v3`
+  is bound, a barrier surface enables it for as long as it holds real
+  keyboard focus; a real input method's `commit_string` (applied at
+  `done`) is forwarded as an `ei_text.utf8` event to the capturing client,
+  chunked on UTF-8 character boundaries under the protocol's 254-byte
+  cap. Additive to the existing per-keystroke forwarding, and entirely
+  optional — its absence never affects barrier/lock/keyboard-focus
+  behavior.
+
 ### Fixed
 
 - **Multi-monitor output enumeration collapsed every output to the first

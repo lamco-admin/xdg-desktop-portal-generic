@@ -49,6 +49,7 @@ use wayland_protocols::{
     wp::{
         pointer_constraints::zv1::client::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
         relative_pointer::zv1::client::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
+        text_input::zv3::client::zwp_text_input_manager_v3::ZwpTextInputManagerV3,
     },
 };
 use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1;
@@ -450,6 +451,22 @@ impl WaylandConnection {
             }
             Err(e) => {
                 tracing::debug!("zwp_relative_pointer_manager_v1 not available: {}", e);
+            }
+        }
+
+        // Optional: composed-text delivery for InputCapture (see
+        // InputCaptureBarrierState::text_input_manager's doc comment).
+        // Missing this is not fatal to InputCapture -- only skips forwarding
+        // ei_text events when a real input method composes text during a
+        // capture session; raw keystrokes still flow regardless.
+        match globals.bind::<ZwpTextInputManagerV3, _, _>(qh, 1..=1, ()) {
+            Ok(manager) => {
+                tracing::debug!("Bound zwp_text_input_manager_v3");
+                state.input_capture.text_input_manager = Some(manager);
+                protocols.wp_text_input = true;
+            }
+            Err(e) => {
+                tracing::debug!("zwp_text_input_manager_v3 not available: {}", e);
             }
         }
 

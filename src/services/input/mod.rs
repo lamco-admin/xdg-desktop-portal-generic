@@ -277,6 +277,19 @@ pub trait InputBackend: Send + Sync {
         })
     }
 
+    /// Forward composed text (a real input method's `commit_string`,
+    /// already applied at `done`) to the EIS client for `session_id` while
+    /// capture is active -- the receiver-context mirror of the
+    /// `ei_text.keysym` sender-context path. Same default-error rationale
+    /// as [`Self::start_input_capture`].
+    fn forward_captured_text(&mut self, session_id: &str, text: &str) -> Result<()> {
+        let _ = (session_id, text);
+        Err(PortalError::InvalidState {
+            expected: "EIS backend with an active receiver-context session".to_string(),
+            actual: "this backend has no InputCapture activation support".to_string(),
+        })
+    }
+
     /// Set the shared Wayland state, used to read the cached compositor
     /// keymap for `InputCapture` keyboard capability. Default no-op for
     /// backends that don't need it.

@@ -42,6 +42,10 @@ use wayland_protocols::{
             zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
             zwp_relative_pointer_v1::{self, ZwpRelativePointerV1},
         },
+        text_input::zv3::client::{
+            zwp_text_input_manager_v3::ZwpTextInputManagerV3,
+            zwp_text_input_v3::{self, ZwpTextInputV3},
+        },
     },
 };
 use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::{
@@ -423,7 +427,7 @@ impl Dispatch<WlKeyboard, ()> for WaylandState {
         event: <WlKeyboard as wayland_client::Proxy>::Event,
         _data: &(),
         _conn: &Connection,
-        _qh: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
     ) {
         use wayland_client::protocol::wl_keyboard::{Event, KeymapFormat};
         match event {
@@ -440,7 +444,10 @@ impl Dispatch<WlKeyboard, ()> for WaylandState {
                 }
             }
             Event::Enter { surface, .. } => {
-                state.input_capture.on_keyboard_enter(&surface);
+                let seat = state.seat.clone();
+                state
+                    .input_capture
+                    .on_keyboard_enter(qh, seat.as_ref(), &surface);
             }
             Event::Leave { .. } => {
                 state.input_capture.on_keyboard_leave();
@@ -1112,6 +1119,47 @@ impl Dispatch<ZwpRelativePointerManagerV1, ()> for WaylandState {
     }
 }
 
+impl Dispatch<ZwpTextInputManagerV3, ()> for WaylandState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ZwpTextInputManagerV3,
+        _event: <ZwpTextInputManagerV3 as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        // No events.
+    }
+}
+
+impl Dispatch<ZwpTextInputV3, ()> for WaylandState {
+    fn event(
+        state: &mut Self,
+        proxy: &ZwpTextInputV3,
+        event: <ZwpTextInputV3 as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwp_text_input_v3::Event::CommitString { text } => {
+                state.input_capture.on_text_input_commit_string(proxy, text);
+            }
+            zwp_text_input_v3::Event::Done { .. } => {
+                state.input_capture.on_text_input_done(proxy);
+            }
+            // `preedit_string` is live, uncommitted composition -- never
+            // forwarded (see the module-level design notes in
+            // input_capture.rs). `enter`/`leave` mirror keyboard focus,
+            // which we already track independently via wl_keyboard. We
+            // never call `set_surrounding_text`, so there is no
+            // surrounding text on our side for `delete_surrounding_text`
+            // to act on. This also covers any future event variant.
+            _ => {}
+        }
+    }
+}
+
 impl Dispatch<ZwlrLayerSurfaceV1, (String, u32)> for WaylandState {
     fn event(
         state: &mut Self,
@@ -1202,7 +1250,7 @@ mod tests {
             name: Some("DP-3".to_string()),
             width: 2560,
             height: 1440,
-            refresh: 120000,
+            refresh: 120_000,
             x: 4480,
             y: 0,
             done: true,
@@ -1213,7 +1261,7 @@ mod tests {
             name: Some("DP-1".to_string()),
             width: 3440,
             height: 1440,
-            refresh: 120000,
+            refresh: 120_000,
             x: 5920,
             y: 588,
             done: true,

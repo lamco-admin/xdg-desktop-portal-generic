@@ -37,6 +37,11 @@ pub struct AvailableProtocols {
     pub wp_pointer_constraints: bool,
     /// zwp-relative-pointer-unstable-v1.
     pub wp_relative_pointer: bool,
+    /// zwp-text-input-v3. Optional: InputCapture's barrier/lock/keyboard-focus
+    /// pipeline (`has_input_capture_barriers`) works without it -- this only
+    /// adds composed-text delivery (`ei_text` events) when a real input
+    /// method is active during a capture session. Never gates availability.
+    pub wp_text_input: bool,
 
     // === Core ===
     /// wl_seat is available.
@@ -94,11 +99,12 @@ impl AvailableProtocols {
         );
         tracing::info!(
             "  InputCapture barriers: wl_compositor={}, wlr-layer-shell={}, \
-             pointer-constraints={}, relative-pointer={}",
+             pointer-constraints={}, relative-pointer={}, text-input={}",
             self.wl_compositor,
             self.wlr_layer_shell,
             self.wp_pointer_constraints,
-            self.wp_relative_pointer
+            self.wp_relative_pointer,
+            self.wp_text_input
         );
         tracing::info!("  Core: seat={}, outputs={}", self.seat, self.output_count);
     }
