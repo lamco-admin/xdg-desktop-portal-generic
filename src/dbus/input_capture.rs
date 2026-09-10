@@ -174,6 +174,33 @@ impl InputCaptureInterface {
         get_option_u32(options, "persist_mode").map_or(PersistMode::None, PersistMode::from_dbus)
     }
 
+    /// Whether the active input backend can actually serve `InputCapture`.
+    ///
+    /// `InputCapture` has no `Notify*`-style fallback the way `RemoteDesktop`
+    /// does -- a wlr-virtual-input-only backend cannot receive input from the
+    /// compositor at all, only inject it -- so a session negotiated on such a
+    /// backend can never succeed at [`Self::connect_to_eis`]. Checking this
+    /// at session-start time instead of waiting for `ConnectToEIS` avoids
+    /// ever reaching that D-Bus method with a doomed session: on an
+    /// unpatched `flatpak/xdg-desktop-portal` frontend (issue #2138, opened
+    /// 2026-09-09), an impl backend's `ConnectToEIS` error return aborts the
+    /// *entire* portal daemon, not just the failing session. Failing earlier
+    /// here, with a normal `Response::Other` rather than a D-Bus method
+    /// error, sidesteps that failure mode entirely for this one avoidable
+    /// path (the other three `connect_to_eis` error paths are genuine
+    /// runtime failures that occur precisely at `ConnectToEIS` time and
+    /// can't be moved earlier).
+    async fn eis_backend_available(&self) -> bool {
+        Self::protocol_supports_input_capture(self.input_backend.lock().await.protocol_type())
+    }
+
+    /// Pure decision behind [`Self::eis_backend_available`], split out so
+    /// it's testable without a live input backend (constructing a real one
+    /// needs an actual Wayland connection).
+    fn protocol_supports_input_capture(protocol: InputProtocol) -> bool {
+        protocol == InputProtocol::Eis
+    }
+
     /// Extract the required `capabilities` bitmask from options.
     ///
     /// Per spec, `capabilities` is required in `Start`'s options and must
@@ -388,6 +415,14 @@ impl InputCaptureInterface {
             "InputCapture.CreateSession (v1, deprecated) called"
         );
 
+        if !self.eis_backend_available().await {
+            tracing::warn!(
+                session_handle = %session_handle,
+                "InputCapture.CreateSession refused: active backend has no EIS support"
+            );
+            return Ok((Response::Other.to_u32(), empty_results()));
+        }
+
         let request_iface = super::RequestInterface::new(Arc::clone(&self.session_manager));
         let _ = server.at(&handle, request_iface).await;
 
@@ -505,6 +540,14 @@ impl InputCaptureInterface {
             app_id = %app_id,
             "InputCapture.Start called"
         );
+
+        if !self.eis_backend_available().await {
+            tracing::warn!(
+                session_handle = %session_handle,
+                "InputCapture.Start refused: active backend has no EIS support"
+            );
+            return Ok((Response::Other.to_u32(), empty_results()));
+        }
 
         let request_iface = super::RequestInterface::for_session(
             Arc::clone(&self.session_manager),
@@ -885,6 +928,12 @@ impl InputCaptureInterface {
 
         let mut backend = self.input_backend.lock().await;
         if backend.protocol_type() != InputProtocol::Eis {
+            // Defense in depth, not the primary guard: `CreateSession`/`Start`
+            // already refuse a non-EIS backend via `Self::eis_backend_available`,
+            // before this method is ever reachable in the normal flow (see that
+            // method's doc comment for why avoiding this specific error return
+            // matters -- an unpatched xdg-desktop-portal frontend aborts its
+            // whole process on it, flatpak/xdg-desktop-portal#2138).
             return Err(zbus::fdo::Error::NotSupported(
                 "InputCapture requires EIS; this compositor is only using wlr virtual input, \
                  which has no equivalent Notify* fallback for InputCapture"
@@ -1062,6 +1111,26 @@ fn owned_value_from_u32_array(values: Vec<u32>) -> OwnedValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_protocol_supports_input_capture_eis() {
+        assert!(InputCaptureInterface::protocol_supports_input_capture(
+            InputProtocol::Eis
+        ));
+    }
+
+    #[test]
+    fn test_protocol_supports_input_capture_wlr_only_is_false() {
+        // InputCapture has no Notify*-style fallback the way RemoteDesktop
+        // does; a wlr-virtual-input-only backend can inject input but never
+        // receive it, so it can never serve InputCapture regardless of
+        // session state -- see `eis_backend_available`'s doc comment for why
+        // CreateSession/Start must reject this before ConnectToEIS is ever
+        // reachable.
+        assert!(!InputCaptureInterface::protocol_supports_input_capture(
+            InputProtocol::WlrVirtualInput
+        ));
+    }
 
     fn barrier_dict(id: u32, pos: (i32, i32, i32, i32)) -> HashMap<String, OwnedValue> {
         let mut dict = HashMap::new();
