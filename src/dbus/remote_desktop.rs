@@ -342,6 +342,7 @@ impl RemoteDesktopInterface {
                     y: s.position.1,
                     width: s.size.0,
                     height: s.size.1,
+                    mapping_id: s.mapping_id.clone(),
                 })
                 .collect();
 

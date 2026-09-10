@@ -13,7 +13,6 @@
 
 use std::{
     collections::{HashMap, VecDeque},
-    fmt::Write as _,
     os::unix::io::{AsFd, OwnedFd},
 };
 
@@ -65,23 +64,66 @@ struct XkbData {
     /// mutated. [`splice_dynamic_keysyms`] always splices from this, not from
     /// a previous splice, so re-splicing is idempotent rather than compounding.
     base_keymap_string: String,
-    /// `base_keymap`'s own maximum keycode, i.e. where the dynamic pool's
-    /// reserved keycode range starts (`base_max_keycode + 1 ..=
-    /// base_max_keycode + DYNAMIC_KEYSYM_POOL_SIZE`).
-    base_max_keycode: u32,
+    /// The base keymap's own symbolic name for each entry of
+    /// [`DYNAMIC_POOL_EVDEV_CODES`], resolved once at startup by
+    /// [`resolve_pool_key_names`]. Index `i` here always corresponds to
+    /// `DYNAMIC_POOL_EVDEV_CODES[i]`.
+    pool_key_names: [String; DYNAMIC_KEYSYM_POOL_SIZE],
     /// LRU pool of keycodes dynamically bound to whatever keysyms the base
     /// "us" layout has no key for (CJK, accented Latin, and other non-ASCII
     /// characters — see `EI-TEXT-SCOPING-2026-09-07.md` in lamco-admin).
     dynamic_pool: DynamicKeysymPool,
 }
 
-/// Number of keycodes reserved above the base keymap's own maximum for
-/// dynamic keysym binding. Small on purpose: each slot only needs to live
-/// long enough to be pressed and released (typically within the same EIS
-/// frame), so a modest LRU pool comfortably covers realistic typing/paste
-/// bursts without the keymap churning on every distinct character seen
-/// over a session's lifetime.
+/// Number of keycodes reserved for dynamic keysym binding. Small on purpose:
+/// each slot only needs to live long enough to be pressed and released
+/// (typically within the same EIS frame), so a modest LRU pool comfortably
+/// covers realistic typing/paste bursts without the keymap churning on every
+/// distinct character seen over a session's lifetime.
 const DYNAMIC_KEYSYM_POOL_SIZE: usize = 32;
+
+/// Evdev keycodes reserved for the dynamic keysym pool, chosen instead of
+/// appending brand-new keycodes past the base keymap's own maximum (the
+/// pool's original design, which put them at evdev ~701-732).
+///
+/// That original range fell entirely outside Chromium/Electron's own
+/// `dom_code_data.inc` evdev-to-DomCode lookup table (its highest covered
+/// evdev value is 633, `PrivacyScreenToggle`, verified against upstream
+/// Chromium source on 2026-09-09), which Chromium/Electron apps (Chrome, VS
+/// Code, Slack, Discord, Signal) consult independently of any XKB keysym
+/// binding. A keycode absent from that table gets dropped before Chromium
+/// ever looks at the keysym our keymap bound to it — Qt/GTK apps, which
+/// don't consult that table, worked the whole time, which is why this went
+/// unnoticed. KWin hit and fixed the identical bug (commit `584bba0`,
+/// 2026-08-14) for its own single scratch keycode, moving it from evdev 247
+/// (`KEY_RFKILL`, absent from Chromium's table) to evdev 194 (`KEY_F24`,
+/// present).
+///
+/// These 32 codes are F13-F23 plus a set of consumer/media/launch keys
+/// (brightness, keyboard illumination, eject, media transport, launch-app,
+/// browser navigation, zoom): each is both covered by Chromium's table and
+/// already declared with a real symbolic name in the standard "evdev" XKB
+/// keycodes ruleset (verified directly against a compiled keymap on this
+/// host — see [`resolve_pool_key_names`]), so [`splice_dynamic_keysyms`]
+/// only ever rebinds an existing key's symbol rather than adding a new one.
+/// Rebinding is safe: our virtual keyboard is a synthetic Wayland device
+/// with its own independent compositor-side XKB state, so it never coexists
+/// with a real physical key using the same evdev code. `KEY_F24` (194)
+/// itself is deliberately excluded — the standard evdev ruleset declares it
+/// in `xkb_keycodes` but not in `xkb_symbols`, so there is no existing `key
+/// <FK24> { ... };` line for [`splice_dynamic_keysyms`] to rebind.
+const DYNAMIC_POOL_EVDEV_CODES: [u32; DYNAMIC_KEYSYM_POOL_SIZE] = [
+    183, 184, 185, 186, 187, 188, 190, 191, 192, 193, // F13-F18, F20-F23
+    179, 180, // NumpadParenLeft, NumpadParenRight
+    225, 224, 244, 230, 229, // brightness up/down/auto, kbd illum up/down
+    161, // Eject
+    208, 168, 167, // media fast-forward, rewind, record
+    144, 140, // LaunchApp1, LaunchApp2
+    155, 156, // LaunchMail, BrowserFavorites
+    173, 128, 159, 158, 172, // browser refresh, stop, forward, back, home
+    217, // BrowserSearch
+    418, // ZoomIn
+];
 
 /// LRU pool of dynamically-bound keycodes, layered on top of a base XKB
 /// keymap via [`splice_dynamic_keysyms`]. Reserves [`DYNAMIC_KEYSYM_POOL_SIZE`]
@@ -141,72 +183,98 @@ impl DynamicKeysymPool {
     }
 }
 
-/// Splice `pool`'s current keysym bindings into `base_keymap`, producing a
-/// keymap text with [`DYNAMIC_KEYSYM_POOL_SIZE`] extra keycodes appended
-/// above `base_max_keycode`, each bound to whatever keysym its pool slot
-/// currently holds (`NoSymbol` for an unused slot).
+/// Resolve the base keymap's own symbolic name for each entry of
+/// [`DYNAMIC_POOL_EVDEV_CODES`], by scanning its `xkb_keycodes` section for
+/// `<NAME> = <number>;` declarations rather than hard-coding names (which
+/// are an xkeyboard-config implementation detail, not a stable XKB
+/// interface). Returns `None` if the section can't be found or any entry's
+/// XKB keycode (`evdev + 8`) has no declared name — a base keymap missing
+/// one of these very ordinary consumer/function keycodes is not something
+/// [`splice_dynamic_keysyms`] can safely rebind, so callers should fail
+/// closed rather than silently run with a smaller effective pool.
+///
+/// `base_keymap` must be libxkbcommon's own `KEYMAP_FORMAT_TEXT_V1` output.
+fn resolve_pool_key_names(base_keymap: &str) -> Option<[String; DYNAMIC_KEYSYM_POOL_SIZE]> {
+    let keycodes_start = base_keymap.find("xkb_keycodes")?;
+    let section_end = base_keymap[keycodes_start..].find("\n};\n")?;
+    let section = &base_keymap[keycodes_start..keycodes_start + section_end];
+
+    let mut names_by_xkb_code: HashMap<u32, &str> = HashMap::new();
+    for line in section.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix('<') else {
+            continue;
+        };
+        let Some((name, rest)) = rest.split_once('>') else {
+            continue;
+        };
+        let Some(rest) = rest.trim_start().strip_prefix('=') else {
+            continue;
+        };
+        let Some(num_str) = rest.trim().strip_suffix(';') else {
+            continue;
+        };
+        if let Ok(num) = num_str.trim().parse::<u32>() {
+            names_by_xkb_code.insert(num, name);
+        }
+    }
+
+    let mut names = Vec::with_capacity(DYNAMIC_KEYSYM_POOL_SIZE);
+    for &evdev in &DYNAMIC_POOL_EVDEV_CODES {
+        let xkb_code = evdev + 8;
+        let name = names_by_xkb_code.get(&xkb_code)?;
+        names.push((*name).to_string());
+    }
+    names.try_into().ok()
+}
+
+/// Splice `pool`'s current keysym bindings into `base_keymap`, rebinding the
+/// `xkb_symbols` entry of each of [`DYNAMIC_POOL_EVDEV_CODES`]'s existing
+/// keys (named per `pool_key_names`, from [`resolve_pool_key_names`]) to
+/// whatever keysym its pool slot currently holds (`NoSymbol` for an unused
+/// slot). Unlike an earlier version of this function, no new keycodes are
+/// added and the keymap's declared `maximum` is untouched — every keycode
+/// this pool uses already exists in the base keymap (see
+/// [`DYNAMIC_POOL_EVDEV_CODES`] for why).
 ///
 /// `base_keymap` must be libxkbcommon's own `KEYMAP_FORMAT_TEXT_V1` output
-/// (i.e. [`xkbcommon::xkb::Keymap::get_as_string`]) — this relies on that
-/// format's deterministic section structure (one `xkb_keycodes`/`xkb_types`/
-/// `xkb_compatibility`/`xkb_symbols` block each, every one closed by a `};`
-/// line on its own, the whole keymap closed by one more such line) to find
-/// safe splice points without a full XKB parser. Verified directly against a
-/// real compiled "us" keymap (recompiles cleanly via
-/// `Keymap::new_from_string`, spliced keycodes resolve to the expected
-/// keysyms, pre-existing keys are untouched) — see the module tests below.
+/// (i.e. [`xkbcommon::xkb::Keymap::get_as_string`]) and `pool_key_names`
+/// must have been resolved from that same text — this relies on an exact,
+/// unique `key <NAME>` textual match per slot, which [`resolve_pool_key_names`]
+/// guarantees by construction. Verified directly against a real compiled
+/// "us" keymap (recompiles cleanly via `Keymap::new_from_string`, spliced
+/// keycodes resolve to the expected keysyms, unrelated keys are untouched)
+/// — see the module tests below.
 fn splice_dynamic_keysyms(
     base_keymap: &str,
-    base_max_keycode: u32,
+    pool_key_names: &[String; DYNAMIC_KEYSYM_POOL_SIZE],
     pool: &DynamicKeysymPool,
 ) -> Option<String> {
-    let new_max = base_max_keycode + DYNAMIC_KEYSYM_POOL_SIZE as u32;
+    let mut out = base_keymap.to_string();
 
-    // xkb_keycodes: raise the declared maximum, then append one `<LDXn> =
-    // <keycode>;` line per pool slot just before that section's closing `};`.
-    let old_max_decl = format!("maximum = {base_max_keycode};");
-    let new_max_decl = format!("maximum = {new_max};");
-    let with_new_max = base_keymap.replacen(&old_max_decl, &new_max_decl, 1);
-    if with_new_max == base_keymap {
-        tracing::error!(
-            "splice_dynamic_keysyms: base keymap has no \"{old_max_decl}\" declaration -- \
-             base_max_keycode is stale or the keymap format changed"
-        );
-        return None;
-    }
-
-    let keycodes_close = with_new_max.find("\n};\n")?;
-    let mut keycode_lines = String::new();
-    for i in 0..DYNAMIC_KEYSYM_POOL_SIZE {
-        let keycode = base_max_keycode + 1 + i as u32;
-        let _ = writeln!(keycode_lines, "\t<LDX{i}> = {keycode};");
-    }
-    let split_at = keycodes_close + 1; // keep the section's own leading '\n'
-    let (before, after) = with_new_max.split_at(split_at);
-    let with_keycodes = format!("{before}{keycode_lines}{after}");
-
-    // xkb_symbols: the section closes are the last two "\n};\n" occurrences
-    // in the file (xkb_symbols itself, then the outer xkb_keymap block) --
-    // insert one `key <LDXn> { [ ... ] };` line per slot just before the
-    // second-to-last one.
-    let closes: Vec<usize> = with_keycodes
-        .match_indices("\n};\n")
-        .map(|(i, _)| i)
-        .collect();
-    let symbols_close_idx = closes.len().checked_sub(2)?;
-    let symbols_close = closes[symbols_close_idx];
-
-    let mut symbol_lines = String::new();
-    for (i, slot) in pool.slots.iter().enumerate() {
+    for (name, slot) in pool_key_names.iter().zip(pool.slots.iter()) {
         let sym = match slot {
             Some(keysym) => format!("0x{keysym:08x}"),
             None => "NoSymbol".to_string(),
         };
-        let _ = writeln!(symbol_lines, "\tkey <LDX{i}> {{ [ {sym} ] }};");
+
+        let needle = format!("key <{name}>");
+        let Some(start) = out.find(&needle) else {
+            tracing::error!(
+                name,
+                "splice_dynamic_keysyms: base keymap has no \"{needle}\" symbols line -- \
+                 pool_key_names is stale or the keymap format changed"
+            );
+            return None;
+        };
+        let rel_end = out[start..].find("};")?;
+        let end = start + rel_end + "};".len();
+
+        let replacement = format!("key <{name}> {{ [ {sym} ] }};");
+        out.replace_range(start..end, &replacement);
     }
-    let split_at = symbols_close + 1;
-    let (before, after) = with_keycodes.split_at(split_at);
-    Some(format!("{before}{symbol_lines}{after}"))
+
+    Some(out)
 }
 
 // SAFETY: xkbcommon Keymap and State are internally reference-counted and
@@ -365,13 +433,22 @@ impl WlrInputBackend {
         })?;
 
         let keymap_string = keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1);
-        let base_max_keycode = keymap.max_keycode().raw();
         let xkb_state = xkb::State::new(&keymap);
+
+        let pool_key_names = resolve_pool_key_names(&keymap_string).ok_or_else(|| {
+            PortalError::Config(
+                "Base XKB keymap is missing one or more of the consumer/function keycodes \
+                 reserved for the dynamic keysym pool -- EIS text/keysym injection for \
+                 out-of-layout characters (CJK, accented Latin, etc.) would silently degrade, \
+                 so refusing to start rather than run with a corrupted pool"
+                    .to_string(),
+            )
+        })?;
 
         tracing::info!(
             "XKB keymap initialized (default us layout, {} bytes, max keycode {})",
             keymap_string.len(),
-            base_max_keycode
+            keymap.max_keycode().raw()
         );
 
         state.xkb = Some(XkbData {
@@ -379,7 +456,7 @@ impl WlrInputBackend {
             state: xkb_state,
             base_keymap_string: keymap_string.clone(),
             keymap_string,
-            base_max_keycode,
+            pool_key_names,
             dynamic_pool: DynamicKeysymPool::new(),
         });
 
@@ -557,9 +634,9 @@ impl WlrInputBackend {
 
     /// Per-output EIS regions for the layout's `PointerAbsolute` device: one region
     /// per known output, shifted so the layout's own top-left (per
-    /// [`Self::layout_bounds`]) is the origin, each tagged with its PipeWire stream
-    /// node ID as the `mapping_id` so a client can correlate a region with the
-    /// matching ScreenCast stream.
+    /// [`Self::layout_bounds`]) is the origin, each tagged with the same
+    /// `mapping_id` string the matching ScreenCast stream advertises, so a
+    /// client can correlate a region with that stream.
     ///
     /// Never empty: it is a libei implementation bug to advertise the
     /// absolute-pointer capability on a virtual device without advertising at
@@ -588,7 +665,7 @@ impl WlrInputBackend {
         mappings
             .values()
             .map(|mapping| PointerRegion {
-                mapping_id: Some(mapping.stream_node_id),
+                mapping_id: mapping.mapping_id.clone(),
                 offset_x: (mapping.x - origin_x).max(0) as u32,
                 offset_y: (mapping.y - origin_y).max(0) as u32,
                 width: mapping.width,
@@ -1035,12 +1112,12 @@ impl InputBackend for WlrInputBackend {
         // (`~/lamco-admin/projects/xdg-desktop-portal-generic/`).
         let xkb_data = self.state.xkb.as_mut()?;
         let (slot, changed) = xkb_data.dynamic_pool.resolve(keysym);
-        let keycode_xkb = xkb_data.base_max_keycode + 1 + slot as u32;
+        let evdev_keycode = DYNAMIC_POOL_EVDEV_CODES[slot];
 
         if changed {
             let Some(spliced) = splice_dynamic_keysyms(
                 &xkb_data.base_keymap_string,
-                xkb_data.base_max_keycode,
+                &xkb_data.pool_key_names,
                 &xkb_data.dynamic_pool,
             ) else {
                 tracing::error!(keysym, "Failed to splice dynamic keysym into keymap text");
@@ -1067,7 +1144,7 @@ impl InputBackend for WlrInputBackend {
 
             tracing::debug!(
                 keysym,
-                keycode = keycode_xkb - 8,
+                keycode = evdev_keycode,
                 "Dynamically bound keycode for keysym; re-uploading keymap to active sessions"
             );
 
@@ -1089,8 +1166,7 @@ impl InputBackend for WlrInputBackend {
             }
         }
 
-        // XKB keycodes are evdev keycodes + 8 (same convention the static path uses).
-        Some(keycode_xkb - 8)
+        Some(evdev_keycode)
     }
 
     fn set_health_sender(&mut self, tx: crate::health::HealthSender) {
@@ -1227,7 +1303,11 @@ mod tests {
             "Keymap string should start with 'xkb_keymap'"
         );
         assert_eq!(xkb.base_keymap_string, xkb.keymap_string);
-        assert_eq!(xkb.base_max_keycode, xkb.keymap.max_keycode().raw());
+        assert_eq!(xkb.pool_key_names.len(), DYNAMIC_KEYSYM_POOL_SIZE);
+        assert!(
+            xkb.pool_key_names.iter().all(|n| !n.is_empty()),
+            "every dynamic pool slot must resolve to a real key name"
+        );
     }
 
     #[test]
@@ -1265,6 +1345,34 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_pool_key_names_finds_every_slot() {
+        use xkbcommon::xkb;
+
+        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+        let base_keymap = xkb::Keymap::new_from_names(
+            &context,
+            "",
+            "",
+            "",
+            "",
+            None,
+            xkb::KEYMAP_COMPILE_NO_FLAGS,
+        )
+        .expect("compile base keymap");
+        let base_text = base_keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1);
+
+        let names =
+            resolve_pool_key_names(&base_text).expect("every reserved evdev code must resolve");
+        assert_eq!(names.len(), DYNAMIC_KEYSYM_POOL_SIZE);
+        assert!(names.iter().all(|n| !n.is_empty()));
+
+        // Known-stable name for the first entry (evdev 183 = XKB F13, named
+        // <FK13> in the standard "evdev" ruleset) -- a spot check that the
+        // scan is reading real names, not placeholders.
+        assert_eq!(names[0], "FK13");
+    }
+
+    #[test]
     fn test_splice_dynamic_keysyms_recompiles_and_resolves() {
         use xkbcommon::xkb;
 
@@ -1279,8 +1387,9 @@ mod tests {
             xkb::KEYMAP_COMPILE_NO_FLAGS,
         )
         .expect("compile base keymap");
-        let base_max = base_keymap.max_keycode().raw();
         let base_text = base_keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1);
+        let pool_key_names =
+            resolve_pool_key_names(&base_text).expect("pool key names must resolve");
 
         // Two keysyms with no keycode anywhere in a plain "us" layout:
         // Katakana KA (U+30AB) and Latin small e-acute (U+00E9).
@@ -1288,8 +1397,8 @@ mod tests {
         pool.resolve(0x0100_30AB);
         pool.resolve(0x0100_00E9);
 
-        let spliced =
-            splice_dynamic_keysyms(&base_text, base_max, &pool).expect("splice should succeed");
+        let spliced = splice_dynamic_keysyms(&base_text, &pool_key_names, &pool)
+            .expect("splice should succeed");
 
         let new_keymap = xkb::Keymap::new_from_string(
             &context,
@@ -1301,12 +1410,14 @@ mod tests {
 
         assert_eq!(
             new_keymap.max_keycode().raw(),
-            base_max + DYNAMIC_KEYSYM_POOL_SIZE as u32
+            base_keymap.max_keycode().raw(),
+            "splice must not change the keymap's declared maximum keycode"
         );
 
-        // Both dynamically-bound keycodes resolve to the expected keysym.
+        // Both dynamically-bound keycodes resolve to the expected keysym, at
+        // the fixed evdev codes DYNAMIC_POOL_EVDEV_CODES reserves for them.
         for (i, expected) in [(0usize, 0x0100_30AB_u32), (1, 0x0100_00E9)] {
-            let keycode = xkb::Keycode::new(base_max + 1 + i as u32);
+            let keycode = xkb::Keycode::new(DYNAMIC_POOL_EVDEV_CODES[i] + 8);
             let syms = new_keymap.key_get_syms_by_level(keycode, 0, 0);
             assert!(
                 syms.iter().any(|s| s.raw() == expected),
@@ -1321,18 +1432,26 @@ mod tests {
             a_syms.iter().any(|s| s.raw() == 0x61),
             "base 'a' key must still resolve"
         );
+
+        // An untouched pool slot (never resolved above) must be NoSymbol, not
+        // leak the key's original consumer/media symbol.
+        let unused_slot = 2;
+        let unused_keycode = xkb::Keycode::new(DYNAMIC_POOL_EVDEV_CODES[unused_slot] + 8);
+        let unused_syms = new_keymap.key_get_syms_by_level(unused_keycode, 0, 0);
+        assert!(
+            unused_syms.is_empty(),
+            "unused pool slot {unused_slot} should be NoSymbol, got {unused_syms:x?}"
+        );
     }
 
     #[test]
-    fn test_splice_dynamic_keysyms_stale_base_max_fails_closed() {
+    fn test_splice_dynamic_keysyms_missing_name_fails_closed() {
         let pool = DynamicKeysymPool::new();
-        // A `base_keymap` with no "maximum = 999;" declaration at all --
-        // simulates a caller passing a stale/wrong base_max_keycode.
-        let result = splice_dynamic_keysyms(
-            "xkb_keymap { xkb_keycodes \"x\" { maximum = 5; };\n};\n",
-            999,
-            &pool,
-        );
+        // A `pool_key_names` set whose entries don't exist anywhere in this
+        // minimal keymap text -- simulates stale/mismatched names.
+        let missing_names: [String; DYNAMIC_KEYSYM_POOL_SIZE] =
+            std::array::from_fn(|i| format!("NOSUCHKEY{i}"));
+        let result = splice_dynamic_keysyms("xkb_keymap {\n};\n", &missing_names, &pool);
         assert!(result.is_none());
     }
 
@@ -1386,6 +1505,7 @@ mod tests {
             1,
             StreamOutputMapping {
                 stream_node_id: 1,
+                mapping_id: Some("output:mon1".to_string()),
                 x: 0,
                 y: 0,
                 width: 2560,
@@ -1404,6 +1524,7 @@ mod tests {
             1,
             StreamOutputMapping {
                 stream_node_id: 1,
+                mapping_id: Some("output:mon1".to_string()),
                 x: 0,
                 y: 0,
                 width: 1920,
@@ -1414,6 +1535,7 @@ mod tests {
             2,
             StreamOutputMapping {
                 stream_node_id: 2,
+                mapping_id: Some("output:mon2".to_string()),
                 x: 1920,
                 y: 0,
                 width: 2560,
@@ -1432,6 +1554,7 @@ mod tests {
             1,
             StreamOutputMapping {
                 stream_node_id: 1,
+                mapping_id: Some("output:mon1".to_string()),
                 x: 0,
                 y: 0,
                 width: 1920,
@@ -1442,6 +1565,7 @@ mod tests {
             2,
             StreamOutputMapping {
                 stream_node_id: 2,
+                mapping_id: Some("output:mon2".to_string()),
                 x: 0,
                 y: 1080,
                 width: 1920,
@@ -1463,6 +1587,7 @@ mod tests {
             1,
             StreamOutputMapping {
                 stream_node_id: 1,
+                mapping_id: Some("output:mon1".to_string()),
                 x: 0,
                 y: 0,
                 width: 1920,
@@ -1473,6 +1598,7 @@ mod tests {
             2,
             StreamOutputMapping {
                 stream_node_id: 2,
+                mapping_id: Some("output:mon2".to_string()),
                 x: -1920,
                 y: 0,
                 width: 1920,
@@ -1506,6 +1632,7 @@ mod tests {
             1,
             StreamOutputMapping {
                 stream_node_id: 1,
+                mapping_id: Some("output:mon1".to_string()),
                 x: 0,
                 y: 0,
                 width: 1920,
@@ -1516,6 +1643,7 @@ mod tests {
             2,
             StreamOutputMapping {
                 stream_node_id: 2,
+                mapping_id: Some("output:mon2".to_string()),
                 x: 1920,
                 y: 0,
                 width: 2560,
@@ -1529,14 +1657,14 @@ mod tests {
             regions,
             vec![
                 PointerRegion {
-                    mapping_id: Some(1),
+                    mapping_id: Some("output:mon1".to_string()),
                     offset_x: 0,
                     offset_y: 0,
                     width: 1920,
                     height: 1080,
                 },
                 PointerRegion {
-                    mapping_id: Some(2),
+                    mapping_id: Some("output:mon2".to_string()),
                     offset_x: 1920,
                     offset_y: 0,
                     width: 2560,
@@ -1556,6 +1684,7 @@ mod tests {
             1,
             StreamOutputMapping {
                 stream_node_id: 1,
+                mapping_id: Some("output:mon1".to_string()),
                 x: 0,
                 y: 0,
                 width: 1920,
@@ -1566,6 +1695,7 @@ mod tests {
             2,
             StreamOutputMapping {
                 stream_node_id: 2,
+                mapping_id: Some("output:mon2".to_string()),
                 x: -1920,
                 y: 0,
                 width: 1920,
@@ -1574,19 +1704,19 @@ mod tests {
         );
 
         let mut regions = WlrInputBackend::compute_pointer_regions(&mappings);
-        regions.sort_by_key(|r| r.mapping_id);
+        regions.sort_by_key(|r| r.mapping_id.clone());
         assert_eq!(
             regions,
             vec![
                 PointerRegion {
-                    mapping_id: Some(1),
+                    mapping_id: Some("output:mon1".to_string()),
                     offset_x: 1920,
                     offset_y: 0,
                     width: 1920,
                     height: 1080,
                 },
                 PointerRegion {
-                    mapping_id: Some(2),
+                    mapping_id: Some("output:mon2".to_string()),
                     offset_x: 0,
                     offset_y: 0,
                     width: 1920,

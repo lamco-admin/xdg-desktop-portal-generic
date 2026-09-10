@@ -116,7 +116,7 @@ impl CaptureBackend for ExtCaptureBackend {
                 node_id,
                 serial: stream_ids.serial,
                 source_id: source.id,
-                position: (0, 0),
+                position: (source.x, source.y),
                 size: (source.width, source.height),
                 source_type: source.source_type,
                 mapping_id: Some(format!("output:{}", source.name)),

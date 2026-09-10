@@ -275,8 +275,8 @@ impl EisSession {
             move |device| {
                 if capabilities.contains(DeviceCapability::PointerAbsolute) {
                     for region in &pointer_regions {
-                        if let Some(mapping_id) = region.mapping_id {
-                            device.device().region_mapping_id(&mapping_id.to_string());
+                        if let Some(ref mapping_id) = region.mapping_id {
+                            device.device().region_mapping_id(mapping_id);
                         }
                         device.device().region(
                             region.offset_x,

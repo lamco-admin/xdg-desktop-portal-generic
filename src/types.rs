@@ -115,25 +115,40 @@ pub struct StreamOutputMapping {
     pub width: u32,
     /// Height of this output in pixels.
     pub height: u32,
+    /// This output's [`StreamInfo::mapping_id`] (format `"output:<name>"`),
+    /// carried through so [`PointerRegion::mapping_id`] can advertise the
+    /// *same* string a RemoteDesktop client reads from the matching
+    /// ScreenCast stream's metadata. Must match byte-for-byte: a client
+    /// correlates an EIS absolute-pointer region to its video stream purely
+    /// by comparing these two strings (see `ei_device.region_mapping_id`
+    /// and the ScreenCast `mapping_id` stream property), so a PipeWire
+    /// node-ID string here (or any other divergent format) breaks
+    /// multi-monitor correlation for any client that actually uses it —
+    /// hit in the field 2026-09-09, see
+    /// `EIS-ABSOLUTE-POINTER-MULTI-MONITOR-GAP-2026-09-09.md` in
+    /// lamco-admin. `None` only when the capture side didn't provide one.
+    pub mapping_id: Option<String>,
 }
 
 /// One EIS region to advertise on a `PointerAbsolute` device: one output's geometry,
 /// shifted into the layout's own top-left-anchored coordinate space (see
-/// `WlrInputBackend::layout_bounds`), plus the PipeWire stream node ID a client can
-/// use to correlate this region with the matching ScreenCast stream via
-/// `ei_device.region_mapping_id`.
+/// `WlrInputBackend::layout_bounds`), plus the same `mapping_id` string the
+/// matching ScreenCast stream advertises, so a client can correlate this region
+/// with that stream via `ei_device.region_mapping_id`.
 ///
 /// Public because [`EisSession::new`](crate::services::input::EisSession::new) takes
 /// a list of these directly, for a caller embedding the EIS backend on its own
 /// (rather than through the [`InputBackend`](crate::services::input::InputBackend)
 /// trait object, which computes them via `WlrInputBackend::pointer_regions`
 /// internally).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PointerRegion {
-    /// PipeWire stream node ID this region correlates with, if any. `None` only
-    /// for the no-outputs-known-yet fallback region, which has no real stream to
-    /// correlate with.
-    pub mapping_id: Option<u32>,
+    /// The output's [`StreamOutputMapping::mapping_id`], to advertise verbatim
+    /// via `ei_device.region_mapping_id` — must be the exact same string the
+    /// corresponding ScreenCast stream advertises, not a derived or
+    /// reformatted value. `None` only for the no-outputs-known-yet fallback
+    /// region, which has no real stream to correlate with.
+    pub mapping_id: Option<String>,
     /// Region X offset in the layout's own coordinate space, in pixels.
     pub offset_x: u32,
     /// Region Y offset in the layout's own coordinate space, in pixels.
@@ -695,6 +710,7 @@ mod tests {
             stream_node_id: 42,
             x: 1920,
             y: 0,
+            mapping_id: Some("output:eDP-1".to_string()),
             width: 2560,
             height: 1440,
         };
