@@ -1619,7 +1619,7 @@ dependencies = [
 
 [[package]]
 name = "xdg-desktop-portal-generic"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "enumflags2",

@@ -1621,7 +1621,7 @@ SOFTWARE.
 ## MIT License
 
 Used by:
-- xdg-desktop-portal-generic 0.8.0
+- xdg-desktop-portal-generic 0.9.0
 
 ```
 MIT License
@@ -2206,5 +2206,4 @@ dealings in these Data Files or Software without prior written
 authorization of the copyright holder.
 
 ```
-
 

@@ -5,6 +5,85 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-09-10
+
+### Fixed
+
+- **Chromium/Electron silently dropped EIS text/keysym injection for any
+  out-of-layout character** (CJK, accented Latin, EuroSign, etc). The
+  `DynamicKeysymPool` reserved keycodes past the base keymap's own maximum
+  (evdev ~701-732), entirely outside Chromium's `dom_code_data.inc`
+  evdev-to-DomCode lookup table (highest covered code: 633,
+  `PrivacyScreenToggle`), so Chromium's own keyboard dispatch dropped the
+  key before ever consulting the keymap. The identical bug class KWin fixed
+  upstream (commit `584bba048`, 2026-08-14) for its own single scratch
+  keycode. Fixed by reserving 32 existing F13-F23/consumer keycodes instead
+  (all covered by Chromium's table, all already declared in the standard
+  "evdev" XKB ruleset), resolved by name at startup rather than hardcoded,
+  with startup failing closed if an expected keycode is missing.
+- **The EIS absolute-pointer region's `mapping_id` never matched the
+  corresponding ScreenCast stream's own `mapping_id` property.** The
+  capture side tagged a stream `"output:<name>"`; the EIS side sent a
+  stringified PipeWire node ID instead. A spec-compliant multi-monitor
+  client correlating a video stream to its input region by `mapping_id`
+  string equality (the mechanism GNOME and KDE both use) could never
+  succeed. `PointerRegion.mapping_id` now carries the same string the
+  ScreenCast stream advertises.
+- **`StreamInfo.position` was hardcoded to `(0, 0)`** instead of the
+  source's real compositor-global x/y, even though `SourceInfo` already
+  had the real value. This fed directly into both the RemoteDesktop and
+  ScreenCast D-Bus `position` property and the input backend's region
+  offsets, so every monitor other than one already at the origin reported
+  and used the wrong position.
+- **`ei_scroll.scroll_discrete` events were forwarded roughly 120x too
+  fast.** The wire value is "fractions or multiples of 120" per the libei
+  protocol (one full wheel click == 120); a single real click was passed
+  straight through as 120 discrete steps to both wlr and uinput injection,
+  which expect a plain click count. Fixed with a per-session remainder
+  accumulator that folds the raw value into whole clicks and carries any
+  leftover fraction forward, so high-resolution devices sending sub-120
+  deltas per event also scroll correctly instead of losing their input to
+  integer-division-to-zero.
+- **`ei_device.region`'s scale argument was hardcoded to `1.0`** regardless
+  of the output's real buffer scale. Nothing in the crate tracked
+  `wl_output.scale` at all; the event fell through a wildcard match and was
+  discarded. Now bound and threaded through `SourceInfo`/`StreamInfo`/
+  `StreamOutputMapping` into `PointerRegion.scale`, matching Mutter's
+  `eis_region_set_physical_scale` and cosmic-comp/Smithay's `EiRegion.scale`.
+- **`InputCapture.ConnectToEIS`'s `NotSupported` error return could crash
+  the entire portal daemon on an unpatched `flatpak/xdg-desktop-portal`
+  frontend** (issue #2138, filed 2026-09-09), not just the failing session.
+  `CreateSession` (v1) and `Start` (v2) now refuse a session on a non-EIS
+  backend with a normal `Response::Other` before the session is considered
+  started, so `ConnectToEIS` is never reached for this avoidable case. The
+  `NotSupported` check itself remains as defense in depth.
+- **An ungraceful client disconnect (process killed, D-Bus name lost
+  without an explicit `Close()` call) never removed the session's own
+  D-Bus object**, unlike the explicit `Session.Close()` path. Every other
+  cleanup step (EIS context teardown, InputCapture barrier-surface
+  destruction, capture stream/PipeWire teardown) was already identical
+  between the two paths.
+
+### Breaking
+
+- **`PointerRegion.mapping_id` changed from `Option<u32>` to
+  `Option<String>`.** It now carries the same string
+  `StreamOutputMapping::mapping_id`/`StreamInfo::mapping_id` use, not a
+  stringified PipeWire node ID. `PointerRegion` also gained a `scale: f32`
+  field and lost its `Copy`/`Eq` derives (kept `Clone`/`PartialEq`), since
+  a `String` field can't be `Copy` and `f32` isn't `Eq`. `PointerRegion`
+  is public because `EisSession::new` takes a `Vec<PointerRegion>`
+  directly; callers going through the `InputBackend` trait object (which
+  computes the list internally via `WlrInputBackend::pointer_regions`) are
+  unaffected. `lamco-rdp-server-dev` uses only the trait-object path and
+  needs no changes.
+- **`StreamOutputMapping` gained `mapping_id: Option<String>` and
+  `scale: i32` fields.** `StreamInfo` and `SourceInfo` each gained a
+  `scale: i32` field. All three structs have public fields with no
+  `#[non_exhaustive]`, so any external code constructing one via struct
+  literal (rather than receiving one from this crate's own APIs) needs to
+  add the new fields.
+
 ## [0.8.0] - 2026-09-09
 
 ### Fixed
