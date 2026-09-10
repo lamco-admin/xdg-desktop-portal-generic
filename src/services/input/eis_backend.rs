@@ -67,6 +67,13 @@ pub struct EisSession {
     /// implementation bug to advertise the absolute-pointer capability on a
     /// virtual device without advertising at least one region).
     pointer_regions: Vec<PointerRegion>,
+    /// Leftover, not-yet-a-full-click fraction of `ei_scroll.scroll_discrete`'s
+    /// wire value (which the libei protocol defines as "fractions or multiples
+    /// of 120", one full wheel click == 120) for each axis, carried across
+    /// requests so a high-resolution scroll device sending sub-120 deltas per
+    /// event still eventually produces whole clicks instead of losing all of
+    /// its input. See [`Self::accumulate_scroll_discrete`].
+    scroll_discrete_remainder: (i32, i32),
 }
 
 enum SessionPhase {
@@ -140,9 +147,32 @@ impl EisSession {
             next_sequence: 0,
             shared_wayland_state,
             pointer_regions,
+            scroll_discrete_remainder: (0, 0),
         };
 
         Ok((session, client_fd))
+    }
+
+    /// Fold one `ei_scroll.scroll_discrete` request's raw wire value (in
+    /// "fractions or multiples of 120", per the libei protocol) into whole
+    /// click counts, carrying any leftover fraction to the next call.
+    ///
+    /// A single full wheel click arrives as `120`; a high-resolution device
+    /// may send smaller deltas (e.g. `40`) that only add up to a full click
+    /// after several events. Simply dividing each event by 120 independently
+    /// would silently discard every such device's input, since `40 / 120 ==
+    /// 0` forever. Returns `(clicks_x, clicks_y)` -- the number of whole
+    /// clicks to emit now, zero on either axis if no full click has
+    /// accumulated yet.
+    pub(crate) fn accumulate_scroll_discrete(&mut self, dx: i32, dy: i32) -> (i32, i32) {
+        let (rem_x, rem_y) = &mut self.scroll_discrete_remainder;
+        *rem_x += dx;
+        *rem_y += dy;
+        let clicks_x = *rem_x / 120;
+        let clicks_y = *rem_y / 120;
+        *rem_x -= clicks_x * 120;
+        *rem_y -= clicks_y * 120;
+        (clicks_x, clicks_y)
     }
 
     /// Process pending data on the EIS socket.
@@ -730,6 +760,51 @@ mod tests {
     fn test_eis_session_new_is_not_receiver() {
         let (session, _fd) = EisSession::new(DeviceTypes::all(), None, Vec::new()).unwrap();
         assert!(!session.is_receiver());
+    }
+
+    #[test]
+    fn test_accumulate_scroll_discrete_single_click_is_immediate() {
+        let (mut session, _fd) = EisSession::new(DeviceTypes::all(), None, Vec::new()).unwrap();
+        // One full wheel click on each axis, per the libei wire convention
+        // (120 == one click).
+        assert_eq!(session.accumulate_scroll_discrete(120, -120), (1, -1));
+    }
+
+    #[test]
+    fn test_accumulate_scroll_discrete_sub_click_deltas_carry_and_eventually_fire() {
+        let (mut session, _fd) = EisSession::new(DeviceTypes::all(), None, Vec::new()).unwrap();
+        // A high-resolution device sending 40 (a third of a click) per event
+        // must not silently lose all of its scroll input by truncating to
+        // zero clicks on every call.
+        assert_eq!(session.accumulate_scroll_discrete(40, 0), (0, 0));
+        assert_eq!(session.accumulate_scroll_discrete(40, 0), (0, 0));
+        assert_eq!(
+            session.accumulate_scroll_discrete(40, 0),
+            (1, 0),
+            "three deltas of 40 must add up to exactly one click"
+        );
+    }
+
+    #[test]
+    fn test_accumulate_scroll_discrete_remainder_is_not_lost_across_many_clicks() {
+        let (mut session, _fd) = EisSession::new(DeviceTypes::all(), None, Vec::new()).unwrap();
+        // 50 + 50 + 50 = 150 = one click (120) plus a 30 remainder carried
+        // forward, not three separate truncated-to-zero non-events.
+        assert_eq!(session.accumulate_scroll_discrete(50, 0), (0, 0));
+        assert_eq!(session.accumulate_scroll_discrete(50, 0), (0, 0));
+        assert_eq!(session.accumulate_scroll_discrete(50, 0), (1, 0));
+        // The 30 leftover is still live: one more 90 completes a second click.
+        assert_eq!(session.accumulate_scroll_discrete(90, 0), (1, 0));
+    }
+
+    #[test]
+    fn test_accumulate_scroll_discrete_negative_direction_reversal() {
+        let (mut session, _fd) = EisSession::new(DeviceTypes::all(), None, Vec::new()).unwrap();
+        // Scrolling one way then reversing before a full click accumulates
+        // must not fire a spurious click in the original direction.
+        assert_eq!(session.accumulate_scroll_discrete(80, 0), (0, 0));
+        assert_eq!(session.accumulate_scroll_discrete(-80, 0), (0, 0));
+        assert_eq!(session.accumulate_scroll_discrete(0, 0), (0, 0));
     }
 
     #[test]

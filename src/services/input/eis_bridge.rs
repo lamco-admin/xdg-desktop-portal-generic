@@ -219,10 +219,6 @@ impl EisBridgeBackend {
                 time_usec: s.time,
             })],
 
-            EisRequest::ScrollDiscrete(s) => {
-                scroll_discrete_events(s.discrete_dx, s.discrete_dy, s.time)
-            }
-
             EisRequest::ScrollStop(s) => {
                 vec![InputEvent::Pointer(PointerEvent::ScrollStop {
                     time_usec: s.time,
@@ -270,17 +266,22 @@ impl EisBridgeBackend {
             // DeviceStart/StopEmulating carry health data harvested in
             // process_events(); DeviceClosed teardown and Ready/resumed
             // gating are also handled there. RequestDevice is sender-context
-            // lifecycle-only. TextKeysym and TextUtf8 are also handled in
-            // process_events (resolving a keysym may need &mut self.wlr,
-            // unavailable to this pure function) -- reaching either here
-            // means it was already staged or logged there, so returning no
-            // additional event is correct, not a gap. See
-            // EI-TEXT-SCOPING-2026-09-07.md in lamco-admin for both.
+            // lifecycle-only. TextKeysym, TextUtf8, and ScrollDiscrete are
+            // also handled in process_events -- TextKeysym/TextUtf8 because
+            // resolving a keysym may need &mut self.wlr, ScrollDiscrete
+            // because folding the wire value into whole clicks needs
+            // per-session remainder state (see
+            // `EisSession::accumulate_scroll_discrete`), neither available to
+            // this pure function -- reaching any of the three here means it
+            // was already staged or logged there, so returning no additional
+            // event is correct, not a gap. See EI-TEXT-SCOPING-2026-09-07.md
+            // in lamco-admin for the text pair.
             EisRequest::Disconnect
             | EisRequest::Bind(_)
             | EisRequest::Frame(_)
             | EisRequest::DeviceStartEmulating(_)
             | EisRequest::DeviceStopEmulating(_)
+            | EisRequest::ScrollDiscrete(_)
             | EisRequest::ScrollCancel(_)
             | EisRequest::TouchCancel(_)
             | EisRequest::DeviceClosed(_)
@@ -496,6 +497,34 @@ impl InputBackend for EisBridgeBackend {
                                     "EIS device ready() received; resuming"
                                 );
                                 ready.device.resumed();
+                            }
+                            // ei_scroll.scroll_discrete's wire value is "fractions or
+                            // multiples of 120" (one full click == 120), not a plain
+                            // click count -- handled here rather than in
+                            // eis_request_to_input_event because folding it into whole
+                            // clicks needs the session's own carried remainder (&mut
+                            // session), unavailable to that pure function. Like
+                            // TextKeysym/TextUtf8, a receiver-context session sending
+                            // this is unexpected (it's the one receiving, not
+                            // emulating), so drop and warn instead of forwarding.
+                            EisRequest::ScrollDiscrete(s) => {
+                                if session.is_receiver() {
+                                    tracing::warn!(
+                                        session_id = %session_id,
+                                        "Unexpected ei_scroll.scroll_discrete from \
+                                         receiver-context EIS session -- dropped"
+                                    );
+                                    continue;
+                                }
+                                let (clicks_x, clicks_y) = session
+                                    .accumulate_scroll_discrete(s.discrete_dx, s.discrete_dy);
+                                let events = scroll_discrete_events(clicks_x, clicks_y, s.time);
+                                if !events.is_empty() {
+                                    self.pending_events
+                                        .entry(session_id.clone())
+                                        .or_default()
+                                        .extend(events);
+                                }
                             }
                             EisRequest::DeviceStartEmulating(evt) => {
                                 if let Some(ref health_tx) = self.health_tx {
