@@ -25,6 +25,8 @@ pub struct SourceInfo {
     pub x: i32,
     /// Position y, in the compositor's global (layout) coordinate space.
     pub y: i32,
+    /// Integer buffer scale (`wl_output.scale`; 1 for a non-HiDPI output).
+    pub scale: i32,
     /// Source type.
     pub source_type: SourceType,
 }
@@ -93,6 +95,11 @@ pub struct StreamInfo {
     /// Format: `"output:<name>"` (e.g., `"output:eDP-1"`). Used by ScreenCast v5
     /// to let clients restore the same source selection without user interaction.
     pub mapping_id: Option<String>,
+    /// Integer buffer scale of the captured output (`wl_output.scale`; 1 for
+    /// a non-HiDPI output). Carried through to the EIS absolute-pointer
+    /// region's `scale` field for this stream's output -- see
+    /// [`crate::types::PointerRegion::scale`].
+    pub scale: i32,
     /// Additional properties.
     pub properties: HashMap<String, String>,
 }
@@ -128,6 +135,9 @@ pub struct StreamOutputMapping {
     /// `EIS-ABSOLUTE-POINTER-MULTI-MONITOR-GAP-2026-09-09.md` in
     /// lamco-admin. `None` only when the capture side didn't provide one.
     pub mapping_id: Option<String>,
+    /// This output's integer buffer scale (`wl_output.scale`; 1 for a
+    /// non-HiDPI output), carried through to [`PointerRegion::scale`].
+    pub scale: i32,
 }
 
 /// One EIS region to advertise on a `PointerAbsolute` device: one output's geometry,
@@ -141,7 +151,7 @@ pub struct StreamOutputMapping {
 /// (rather than through the [`InputBackend`](crate::services::input::InputBackend)
 /// trait object, which computes them via `WlrInputBackend::pointer_regions`
 /// internally).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PointerRegion {
     /// The output's [`StreamOutputMapping::mapping_id`], to advertise verbatim
     /// via `ei_device.region_mapping_id` — must be the exact same string the
@@ -157,6 +167,13 @@ pub struct PointerRegion {
     pub width: u32,
     /// Region height in pixels.
     pub height: u32,
+    /// The output's physical/buffer scale, forwarded verbatim to
+    /// `ei_device.region`'s `scale` argument. Mutter
+    /// (`eis_region_set_physical_scale`) and cosmic-comp/Smithay
+    /// (`EiRegion { scale, .. }`) both advertise the real per-output scale
+    /// here; we previously hardcoded `1.0` regardless of the output's actual
+    /// scale. `1.0` for the no-outputs-known-yet fallback region.
+    pub scale: f32,
 }
 
 /// A single InputCapture zone: one output's geometry in compositor-global
@@ -713,6 +730,7 @@ mod tests {
             mapping_id: Some("output:eDP-1".to_string()),
             width: 2560,
             height: 1440,
+            scale: 2,
         };
         assert_eq!(mapping.stream_node_id, 42);
         assert_eq!(mapping.x, 1920);

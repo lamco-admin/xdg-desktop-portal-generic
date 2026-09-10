@@ -313,7 +313,7 @@ impl EisSession {
                             region.offset_y,
                             region.width,
                             region.height,
-                            1.0,
+                            region.scale,
                         );
                     }
                 }

@@ -504,6 +504,7 @@ mod tests {
                 refresh_rate: 60000,
                 x: 0,
                 y: 0,
+                scale: 1,
                 source_type: crate::types::SourceType::Monitor,
             }])
             .unwrap();

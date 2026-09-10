@@ -658,6 +658,7 @@ impl WlrInputBackend {
                 offset_y: 0,
                 width,
                 height,
+                scale: 1.0,
             }];
         }
 
@@ -670,6 +671,7 @@ impl WlrInputBackend {
                 offset_y: (mapping.y - origin_y).max(0) as u32,
                 width: mapping.width,
                 height: mapping.height,
+                scale: mapping.scale as f32,
             })
             .collect()
     }
@@ -1510,6 +1512,7 @@ mod tests {
                 y: 0,
                 width: 2560,
                 height: 1440,
+                scale: 1,
             },
         );
 
@@ -1529,6 +1532,7 @@ mod tests {
                 y: 0,
                 width: 1920,
                 height: 1080,
+                scale: 1,
             },
         );
         mappings.insert(
@@ -1540,6 +1544,7 @@ mod tests {
                 y: 0,
                 width: 2560,
                 height: 1440,
+                scale: 1,
             },
         );
 
@@ -1559,6 +1564,7 @@ mod tests {
                 y: 0,
                 width: 1920,
                 height: 1080,
+                scale: 1,
             },
         );
         mappings.insert(
@@ -1570,6 +1576,7 @@ mod tests {
                 y: 1080,
                 width: 1920,
                 height: 1080,
+                scale: 1,
             },
         );
 
@@ -1592,6 +1599,7 @@ mod tests {
                 y: 0,
                 width: 1920,
                 height: 1080,
+                scale: 1,
             },
         );
         mappings.insert(
@@ -1603,6 +1611,7 @@ mod tests {
                 y: 0,
                 width: 1920,
                 height: 1080,
+                scale: 1,
             },
         );
 
@@ -1621,6 +1630,7 @@ mod tests {
                 offset_y: 0,
                 width: 1920,
                 height: 1080,
+                scale: 1.0,
             }]
         );
     }
@@ -1637,6 +1647,7 @@ mod tests {
                 y: 0,
                 width: 1920,
                 height: 1080,
+                scale: 1,
             },
         );
         mappings.insert(
@@ -1648,6 +1659,7 @@ mod tests {
                 y: 0,
                 width: 2560,
                 height: 1440,
+                scale: 1,
             },
         );
 
@@ -1662,6 +1674,7 @@ mod tests {
                     offset_y: 0,
                     width: 1920,
                     height: 1080,
+                    scale: 1.0,
                 },
                 PointerRegion {
                     mapping_id: Some("output:mon2".to_string()),
@@ -1669,8 +1682,59 @@ mod tests {
                     offset_y: 0,
                     width: 2560,
                     height: 1440,
+                    scale: 1.0,
                 },
             ]
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "scale is an exact `as f32` cast of a small integer (1 or 2), never \
+                  computed via arithmetic that could introduce rounding error"
+    )]
+    fn test_pointer_regions_carries_each_outputs_own_scale() {
+        // A mixed-DPI layout: a 2x HiDPI primary next to a 1x secondary.
+        // Each region must carry its own output's scale, not a shared or
+        // hardcoded value -- this is what ei_device.region's scale argument
+        // needs to be correct on a real fractional/HiDPI multi-monitor
+        // wlroots session (previously hardcoded to 1.0 for every output).
+        let mut mappings = HashMap::new();
+        mappings.insert(
+            1,
+            StreamOutputMapping {
+                stream_node_id: 1,
+                mapping_id: Some("output:mon1".to_string()),
+                x: 0,
+                y: 0,
+                width: 3840,
+                height: 2160,
+                scale: 2,
+            },
+        );
+        mappings.insert(
+            2,
+            StreamOutputMapping {
+                stream_node_id: 2,
+                mapping_id: Some("output:mon2".to_string()),
+                x: 3840,
+                y: 0,
+                width: 1920,
+                height: 1080,
+                scale: 1,
+            },
+        );
+
+        let mut regions = WlrInputBackend::compute_pointer_regions(&mappings);
+        regions.sort_by_key(|r| r.offset_x);
+        assert_eq!(
+            regions[0].scale, 2.0,
+            "HiDPI output must keep its own scale"
+        );
+        assert_eq!(
+            regions[1].scale, 1.0,
+            "non-HiDPI output must not inherit the other output's scale"
         );
     }
 
@@ -1689,6 +1753,7 @@ mod tests {
                 y: 0,
                 width: 1920,
                 height: 1080,
+                scale: 1,
             },
         );
         mappings.insert(
@@ -1700,6 +1765,7 @@ mod tests {
                 y: 0,
                 width: 1920,
                 height: 1080,
+                scale: 1,
             },
         );
 
@@ -1714,6 +1780,7 @@ mod tests {
                     offset_y: 0,
                     width: 1920,
                     height: 1080,
+                    scale: 1.0,
                 },
                 PointerRegion {
                     mapping_id: Some("output:mon2".to_string()),
@@ -1721,6 +1788,7 @@ mod tests {
                     offset_y: 0,
                     width: 1920,
                     height: 1080,
+                    scale: 1.0,
                 },
             ]
         );

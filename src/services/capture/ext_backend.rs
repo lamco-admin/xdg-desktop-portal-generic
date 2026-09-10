@@ -120,6 +120,7 @@ impl CaptureBackend for ExtCaptureBackend {
                 size: (source.width, source.height),
                 source_type: source.source_type,
                 mapping_id: Some(format!("output:{}", source.name)),
+                scale: source.scale,
                 properties: HashMap::new(),
             };
 
@@ -231,6 +232,7 @@ mod tests {
             refresh_rate: 60000,
             x: 0,
             y: 0,
+            scale: 1,
             source_type: SourceType::Monitor,
         }];
 

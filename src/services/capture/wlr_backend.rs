@@ -118,6 +118,7 @@ impl CaptureBackend for WlrCaptureBackend {
                 size: (source.width, source.height),
                 source_type: source.source_type,
                 mapping_id: Some(format!("output:{}", source.name)),
+                scale: source.scale,
                 properties: HashMap::new(),
             };
 

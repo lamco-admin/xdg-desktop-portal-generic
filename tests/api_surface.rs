@@ -284,6 +284,7 @@ fn stream_output_mapping_creation() {
         width: 2560,
         height: 1440,
         mapping_id: Some("output:eDP-1".to_string()),
+        scale: 1,
     };
 
     assert_eq!(mapping.stream_node_id, 42);

@@ -82,7 +82,7 @@ use super::{
 use crate::types::{InputCaptureZone, SourceInfo};
 
 /// Output information collected from wl_output events.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct OutputInfo {
     /// Global name from the registry.
     pub global_name: u32,
@@ -104,8 +104,35 @@ pub struct OutputInfo {
     pub x: i32,
     /// Position y.
     pub y: i32,
+    /// Integer buffer scale (`wl_output.scale`, default 1 if the compositor
+    /// never sends the event -- matches the protocol's own default). Only
+    /// the integer factor: this crate doesn't bind `wp_fractional_scale_v1`,
+    /// so a compositor using true fractional scaling (1.25x, 1.5x) is
+    /// rounded to the nearest integer scale a client would fall back to
+    /// anyway; still strictly more correct than the `1.0` this replaces for
+    /// the common 2x/3x HiDPI case.
+    pub scale: i32,
     /// Whether this output info has received a 'done' event.
     pub done: bool,
+}
+
+impl Default for OutputInfo {
+    fn default() -> Self {
+        Self {
+            global_name: 0,
+            name: None,
+            description: None,
+            physical_width: 0,
+            physical_height: 0,
+            width: 0,
+            height: 0,
+            refresh: 0,
+            x: 0,
+            y: 0,
+            scale: 1,
+            done: false,
+        }
+    }
 }
 
 impl OutputInfo {
@@ -123,6 +150,7 @@ impl OutputInfo {
             refresh_rate: self.refresh,
             x: self.x,
             y: self.y,
+            scale: self.scale,
             source_type: crate::types::SourceType::Monitor,
         }
     }
@@ -528,6 +556,9 @@ impl Dispatch<WlOutput, Arc<Mutex<OutputInfo>>> for WaylandState {
                 }
                 Event::Description { description } => {
                     info.description = Some(description);
+                }
+                Event::Scale { factor } => {
+                    info.scale = factor;
                 }
                 Event::Done => {
                     info.done = true;
@@ -1241,6 +1272,23 @@ mod tests {
         // its actual compositor-layout position).
         assert_eq!(source.x, 1920);
         assert_eq!(source.y, 588);
+        // Default scale (no wl_output.scale event received) must be 1, per
+        // the protocol's own default, not 0 from a naively-derived Default.
+        assert_eq!(source.scale, 1);
+    }
+
+    #[test]
+    fn test_output_info_scale_survives_to_source_info() {
+        let info = OutputInfo {
+            global_name: 1,
+            width: 3840,
+            height: 2160,
+            done: true,
+            scale: 2,
+            ..Default::default()
+        };
+
+        assert_eq!(info.to_source_info().scale, 2);
     }
 
     #[test]
