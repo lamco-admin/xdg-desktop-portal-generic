@@ -5,7 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-09-09
+
+### Fixed
+
+- **The EIS bridge's `PointerAbsolute` device never advertised any region,
+  and multi-monitor absolute pointer targeting was silently broken as a
+  result.** `eis_backend.rs` created the device with the absolute-pointer
+  capability but never called `ei_device.region()` on it — a libei
+  implementation bug in its own right (the protocol says advertising the
+  capability without a region is one) — and `eis_bridge.rs` then treated
+  every incoming `ei_pointer_absolute` request as already-normalized
+  `[0, 1]` coordinates with a hardcoded, meaningless target stream. On any
+  multi-monitor layout, an absolute motion intended for any monitor other
+  than whichever one happened to be registered first got mapped against
+  the wrong monitor's geometry (or, for real compositor-pixel-scale
+  coordinates, clamped to the edge of whatever the fallback interpreted
+  as "normalized"). Dates to `678d074c` (2026-05-22), a documented but
+  never-tracked punt; found by reading `xdg-desktop-portal-hyprland#426`
+  in full, which independently landed the same class of fix. Full
+  root-cause writeup:
+  `lamco-admin/projects/xdg-desktop-portal-generic/EIS-ABSOLUTE-POINTER-MULTI-MONITOR-GAP-2026-09-09.md`.
+- **The layout bounding-box computation assumed the layout's own origin
+  was always `(0, 0)`.** A monitor placed left of or above the primary
+  (a real, supported layout) has a negative `x`/`y` in compositor-global
+  coordinates; the old logic only tracked the maximum right/bottom edge,
+  so it silently mispositioned this case for the D-Bus
+  `NotifyPointerMotionAbsolute` multi-monitor path too. Replaced with an
+  origin-aware `layout_bounds` that tracks the true minimum as well.
+
+### Added
+
+- **EIS regions, one per known output, on the `PointerAbsolute` device**,
+  each shifted into the layout's own top-left-anchored coordinate space
+  and tagged via `ei_device.region_mapping_id` with the corresponding
+  PipeWire stream node ID, so a client can correlate a region with its
+  matching ScreenCast stream the same way the D-Bus
+  `NotifyPointerMotionAbsolute` caller already can explicitly. Falls back
+  to a single region covering the default layout size when no outputs are
+  known yet (never zero regions, per the libei requirement above).
+
+### Breaking
+
+- **`EisSession::new` gained a required `pointer_regions: Vec<PointerRegion>`
+  parameter.** `EisSession` is public and directly constructible, so this
+  breaks any external caller that doesn't go through the `InputBackend`
+  trait object (which computes the list internally via
+  `WlrInputBackend::pointer_regions` and is unaffected).
+  `lamco-rdp-server-dev` uses only the trait-object path and needs no
+  changes. `PointerRegion` itself is a new public struct.
+
 ## [0.7.0] - 2026-09-07
+
+### Breaking
 
 ### Breaking
 

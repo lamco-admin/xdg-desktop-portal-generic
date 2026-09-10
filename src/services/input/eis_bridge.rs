@@ -142,7 +142,20 @@ impl EisBridgeBackend {
         })
     }
 
+    /// Stream value signalling "no specific per-output target" on a converted
+    /// [`PointerEvent::MotionAbsolute`], used for events arriving over EIS (the wire
+    /// protocol carries no stream/region selector of its own -- see
+    /// [`Self::eis_request_to_input_event`]). Any real PipeWire node ID works as the
+    /// "has a mapping" case in `WlrInputBackend::inject_event`'s `stream_mappings`
+    /// lookup, including small values, so this needs to be a value no real node ID
+    /// will ever collide with rather than e.g. `0`.
+    const NO_TARGET_STREAM: u32 = u32::MAX;
+
     /// Convert a high-level `EisRequest` to zero or more `InputEvent`s.
+    ///
+    /// `layout_extent` is the layout's total pixel size (`WlrInputBackend::layout_extent`),
+    /// needed to interpret `PointerMotionAbsolute`'s coordinates against the same space
+    /// its EIS regions were advertised in.
     ///
     /// Returns an empty `Vec` for protocol-level events that don't map to
     /// input (Bind, Frame, DeviceStart/StopEmulating, Disconnect) and for
@@ -151,7 +164,10 @@ impl EisBridgeBackend {
     /// libei's `VALUE`-class rejection). Returns two events for a
     /// `ScrollDiscrete` request that carries both axes at once (simultaneous
     /// diagonal scroll) -- a single event would silently drop one axis.
-    fn eis_request_to_input_event(request: &EisRequest) -> Vec<InputEvent> {
+    fn eis_request_to_input_event(
+        request: &EisRequest,
+        layout_extent: (u32, u32),
+    ) -> Vec<InputEvent> {
         match request {
             EisRequest::PointerMotion(m) => vec![InputEvent::Pointer(PointerEvent::Motion {
                 dx: f64::from(m.dx),
@@ -160,16 +176,24 @@ impl EisBridgeBackend {
             })],
 
             EisRequest::PointerMotionAbsolute(m) => {
-                // EIS absolute coords are in device-region pixels; we don't have
-                // that region here, so signal "already normalized" with 0 extents.
-                // libei callers that need correct multi-monitor mapping must use
-                // the wlr backend path with explicit extents.
+                // The EIS wire protocol carries no per-request stream/region
+                // selector (confirmed against reis's generated `PointerAbsolute`
+                // request: only dx_absolute/dy_absolute). `dx_absolute`/
+                // `dy_absolute` are coordinates within the device's own advertised
+                // regions (see `EisSession::transition_to_active`, which advertises
+                // one region per output via `WlrInputBackend::pointer_regions`, all
+                // shifted into the same layout-origin space `layout_extent` covers).
+                // So a request is interpreted as a point in the *whole* layout, not
+                // resolved to any single output's region: NO_TARGET_STREAM steers
+                // `inject_event`'s `stream_mappings` lookup to its "no mapping"
+                // branch, which projects the point directly against `layout_extent`.
+                let (x_extent, y_extent) = layout_extent;
                 vec![InputEvent::Pointer(PointerEvent::MotionAbsolute {
                     x: f64::from(m.dx_absolute),
                     y: f64::from(m.dy_absolute),
-                    x_extent: 0,
-                    y_extent: 0,
-                    stream: 0,
+                    x_extent,
+                    y_extent,
+                    stream: Self::NO_TARGET_STREAM,
                     time_usec: m.time,
                 })]
             }
@@ -341,7 +365,11 @@ impl InputBackend for EisBridgeBackend {
         }
 
         // Create the EIS session (server-side socket + handshake)
-        let (eis_session, client_fd) = EisSession::new(devices, self.shared_wayland_state.clone())?;
+        let (eis_session, client_fd) = EisSession::new(
+            devices,
+            self.shared_wayland_state.clone(),
+            self.wlr.pointer_regions(),
+        )?;
 
         // Create wlr virtual devices for forwarding
         self.wlr.create_context(session_id, devices)?;
@@ -571,7 +599,8 @@ impl InputBackend for EisBridgeBackend {
                             _ => {}
                         }
 
-                        let converted = Self::eis_request_to_input_event(request);
+                        let converted =
+                            Self::eis_request_to_input_event(request, self.wlr.layout_extent());
                         if converted.is_empty() {
                             continue;
                         }
@@ -724,7 +753,8 @@ mod tests {
 
     #[test]
     fn test_eis_request_to_input_event_disconnect_returns_none() {
-        let events = EisBridgeBackend::eis_request_to_input_event(&EisRequest::Disconnect);
+        let events =
+            EisBridgeBackend::eis_request_to_input_event(&EisRequest::Disconnect, (1920, 1080));
         assert!(
             events.is_empty(),
             "Disconnect should not produce an InputEvent"

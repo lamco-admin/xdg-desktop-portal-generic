@@ -37,8 +37,8 @@ use super::{InputBackend, InputProtocol, WlrConfig};
 use crate::{
     error::{PortalError, Result},
     types::{
-        ButtonState, DeviceTypes, InputEvent, KeyState, KeyboardEvent, PointerEvent, ScrollAxis,
-        StreamOutputMapping,
+        ButtonState, DeviceTypes, InputEvent, KeyState, KeyboardEvent, PointerEvent, PointerRegion,
+        ScrollAxis, StreamOutputMapping,
     },
 };
 
@@ -510,22 +510,100 @@ impl WlrInputBackend {
     ///
     /// Returns `(width, height)` covering all output regions. If no stream
     /// mappings are set, falls back to a reasonable default.
+    ///
+    /// Origin-unaware: assumes the layout's own origin is `(0, 0)`. Correct only
+    /// when no output has a negative `x`/`y`. Kept for callers that only need a
+    /// size, not a placement; [`Self::layout_bounds`] is origin-aware and should
+    /// be preferred for anything that also needs to place a point within the
+    /// layout (e.g. EIS region offsets).
     fn compute_total_extent(&self) -> (u32, u32) {
-        if self.stream_mappings.is_empty() {
-            return (1920, 1080); // Reasonable default for single-monitor
+        let (_, _, width, height) = Self::layout_bounds(&self.stream_mappings);
+        (width, height)
+    }
+
+    /// Compute the layout's bounding box: the smallest rectangle containing every
+    /// known output, in the same compositor-global coordinate space `stream_mappings`
+    /// entries use.
+    ///
+    /// Returns `(origin_x, origin_y, width, height)`. `origin_x`/`origin_y` are the
+    /// top-left corner of that box — negative when an output sits left of or above
+    /// compositor-global `(0, 0)` (a monitor placed left of or above the primary is a
+    /// real, supported layout, not an edge case). Subtracting them from a
+    /// compositor-global point shifts it into the layout's own top-left-anchored
+    /// space, which is what EIS region offsets need (`ei_device.region`'s offsets are
+    /// unsigned, so a negative compositor-global coordinate could not be advertised
+    /// directly). Falls back to `(0, 0, 1920, 1080)` when no mappings are set.
+    fn layout_bounds(mappings: &HashMap<u32, StreamOutputMapping>) -> (i32, i32, u32, u32) {
+        if mappings.is_empty() {
+            return (0, 0, 1920, 1080); // Reasonable default for single-monitor
         }
 
-        let mut max_x: i32 = 0;
-        let mut max_y: i32 = 0;
+        let mut min_x = i32::MAX;
+        let mut min_y = i32::MAX;
+        let mut max_x = i32::MIN;
+        let mut max_y = i32::MIN;
 
-        for mapping in self.stream_mappings.values() {
-            let right = mapping.x + mapping.width as i32;
-            let bottom = mapping.y + mapping.height as i32;
-            max_x = max_x.max(right);
-            max_y = max_y.max(bottom);
+        for mapping in mappings.values() {
+            min_x = min_x.min(mapping.x);
+            min_y = min_y.min(mapping.y);
+            max_x = max_x.max(mapping.x + mapping.width as i32);
+            max_y = max_y.max(mapping.y + mapping.height as i32);
         }
 
-        (max_x.max(1) as u32, max_y.max(1) as u32)
+        let width = (max_x - min_x).max(1) as u32;
+        let height = (max_y - min_y).max(1) as u32;
+        (min_x, min_y, width, height)
+    }
+
+    /// Per-output EIS regions for the layout's `PointerAbsolute` device: one region
+    /// per known output, shifted so the layout's own top-left (per
+    /// [`Self::layout_bounds`]) is the origin, each tagged with its PipeWire stream
+    /// node ID as the `mapping_id` so a client can correlate a region with the
+    /// matching ScreenCast stream.
+    ///
+    /// Never empty: it is a libei implementation bug to advertise the
+    /// absolute-pointer capability on a virtual device without advertising at
+    /// least one region, so when no stream mappings are set yet, this falls back
+    /// to a single region covering `layout_bounds`' own default extent (no
+    /// `mapping_id`, since there is no real stream to correlate it with yet).
+    pub(crate) fn pointer_regions(&self) -> Vec<PointerRegion> {
+        Self::compute_pointer_regions(&self.stream_mappings)
+    }
+
+    /// Pure logic behind [`Self::pointer_regions`], separated out so it's testable
+    /// against plain `StreamOutputMapping` data without a live Wayland connection.
+    fn compute_pointer_regions(mappings: &HashMap<u32, StreamOutputMapping>) -> Vec<PointerRegion> {
+        if mappings.is_empty() {
+            let (_, _, width, height) = Self::layout_bounds(mappings);
+            return vec![PointerRegion {
+                mapping_id: None,
+                offset_x: 0,
+                offset_y: 0,
+                width,
+                height,
+            }];
+        }
+
+        let (origin_x, origin_y, _, _) = Self::layout_bounds(mappings);
+        mappings
+            .values()
+            .map(|mapping| PointerRegion {
+                mapping_id: Some(mapping.stream_node_id),
+                offset_x: (mapping.x - origin_x).max(0) as u32,
+                offset_y: (mapping.y - origin_y).max(0) as u32,
+                width: mapping.width,
+                height: mapping.height,
+            })
+            .collect()
+    }
+
+    /// The layout's total pixel size — the same `(width, height)` its
+    /// [`Self::pointer_regions`] are laid out within. Used to interpret an
+    /// absolute-motion request that carries no per-stream target (the EIS wire
+    /// protocol has no such field) as a coordinate within the whole layout rather
+    /// than any single output's own region.
+    pub(crate) fn layout_extent(&self) -> (u32, u32) {
+        self.compute_total_extent()
     }
 
     /// Flush the Wayland connection.
@@ -609,13 +687,19 @@ impl WlrInputBackend {
                     let mapping_hit = self.stream_mappings.contains_key(&stream);
                     let (abs_x, abs_y) = if let Some(mapping) = self.stream_mappings.get(&stream) {
                         // Translate normalized stream coords to compositor-global pixels
-                        // (output position + normalized * output size), then re-normalize
-                        // against total compositor extent for the wlr protocol.
+                        // (output position + normalized * output size), shift into the
+                        // layout's own top-left-anchored space (an output left of or
+                        // above compositor-global 0,0 is a real layout, not an edge
+                        // case), then re-normalize against the layout extent for the
+                        // wlr protocol.
+                        let (origin_x, origin_y, total_w, total_h) =
+                            Self::layout_bounds(&self.stream_mappings);
                         let pixel_x = f64::from(mapping.x) + nx * f64::from(mapping.width);
                         let pixel_y = f64::from(mapping.y) + ny * f64::from(mapping.height);
-                        let (total_w, total_h) = self.compute_total_extent();
-                        let ax = ((pixel_x / f64::from(total_w)) * f64::from(extent)) as u32;
-                        let ay = ((pixel_y / f64::from(total_h)) * f64::from(extent)) as u32;
+                        let layout_x = pixel_x - f64::from(origin_x);
+                        let layout_y = pixel_y - f64::from(origin_y);
+                        let ax = ((layout_x / f64::from(total_w)) * f64::from(extent)) as u32;
+                        let ay = ((layout_y / f64::from(total_h)) * f64::from(extent)) as u32;
                         (ax, ay)
                     } else {
                         // No mapping: project normalized coords directly to wlr extent.
@@ -1288,15 +1372,15 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_total_extent_empty() {
-        // No stream mappings → reasonable default
+    fn test_layout_bounds_empty() {
+        // No stream mappings → reasonable default, origin at (0, 0)
         let mappings = HashMap::new();
-        let backend_extent = compute_extent_from_mappings(&mappings);
-        assert_eq!(backend_extent, (1920, 1080));
+        let bounds = WlrInputBackend::layout_bounds(&mappings);
+        assert_eq!(bounds, (0, 0, 1920, 1080));
     }
 
     #[test]
-    fn test_compute_total_extent_single_monitor() {
+    fn test_layout_bounds_single_monitor() {
         let mut mappings = HashMap::new();
         mappings.insert(
             1,
@@ -1309,12 +1393,12 @@ mod tests {
             },
         );
 
-        let extent = compute_extent_from_mappings(&mappings);
-        assert_eq!(extent, (2560, 1440));
+        let bounds = WlrInputBackend::layout_bounds(&mappings);
+        assert_eq!(bounds, (0, 0, 2560, 1440));
     }
 
     #[test]
-    fn test_compute_total_extent_dual_monitor_side_by_side() {
+    fn test_layout_bounds_dual_monitor_side_by_side() {
         let mut mappings = HashMap::new();
         mappings.insert(
             1,
@@ -1337,12 +1421,12 @@ mod tests {
             },
         );
 
-        let extent = compute_extent_from_mappings(&mappings);
-        assert_eq!(extent, (4480, 1440)); // 1920 + 2560, max(1080, 1440)
+        let bounds = WlrInputBackend::layout_bounds(&mappings);
+        assert_eq!(bounds, (0, 0, 4480, 1440)); // 1920 + 2560, max(1080, 1440)
     }
 
     #[test]
-    fn test_compute_total_extent_stacked_monitors() {
+    fn test_layout_bounds_stacked_monitors() {
         let mut mappings = HashMap::new();
         mappings.insert(
             1,
@@ -1365,26 +1449,150 @@ mod tests {
             },
         );
 
-        let extent = compute_extent_from_mappings(&mappings);
-        assert_eq!(extent, (1920, 2160)); // same width, 1080 + 1080
+        let bounds = WlrInputBackend::layout_bounds(&mappings);
+        assert_eq!(bounds, (0, 0, 1920, 2160)); // same width, 1080 + 1080
     }
 
-    /// Helper to compute extent from mappings (mirrors WlrInputBackend::compute_total_extent)
-    fn compute_extent_from_mappings(mappings: &HashMap<u32, StreamOutputMapping>) -> (u32, u32) {
-        if mappings.is_empty() {
-            return (1920, 1080);
-        }
+    #[test]
+    fn test_layout_bounds_monitor_left_of_origin() {
+        // A monitor placed left of the primary sits at a negative x -- a real,
+        // supported layout, not an edge case. The old bounding-box logic assumed
+        // the origin was always (0, 0) and silently mispositioned this case.
+        let mut mappings = HashMap::new();
+        mappings.insert(
+            1,
+            StreamOutputMapping {
+                stream_node_id: 1,
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+        );
+        mappings.insert(
+            2,
+            StreamOutputMapping {
+                stream_node_id: 2,
+                x: -1920,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+        );
 
-        let mut max_x: i32 = 0;
-        let mut max_y: i32 = 0;
+        let bounds = WlrInputBackend::layout_bounds(&mappings);
+        assert_eq!(bounds, (-1920, 0, 3840, 1080));
+    }
 
-        for mapping in mappings.values() {
-            let right = mapping.x + mapping.width as i32;
-            let bottom = mapping.y + mapping.height as i32;
-            max_x = max_x.max(right);
-            max_y = max_y.max(bottom);
-        }
+    #[test]
+    fn test_pointer_regions_no_mappings_falls_back_to_single_region() {
+        let regions = WlrInputBackend::compute_pointer_regions(&HashMap::new());
+        assert_eq!(
+            regions,
+            vec![PointerRegion {
+                mapping_id: None,
+                offset_x: 0,
+                offset_y: 0,
+                width: 1920,
+                height: 1080,
+            }]
+        );
+    }
 
-        (max_x.max(1) as u32, max_y.max(1) as u32)
+    #[test]
+    fn test_pointer_regions_dual_monitor_side_by_side() {
+        let mut mappings = HashMap::new();
+        mappings.insert(
+            1,
+            StreamOutputMapping {
+                stream_node_id: 1,
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+        );
+        mappings.insert(
+            2,
+            StreamOutputMapping {
+                stream_node_id: 2,
+                x: 1920,
+                y: 0,
+                width: 2560,
+                height: 1440,
+            },
+        );
+
+        let mut regions = WlrInputBackend::compute_pointer_regions(&mappings);
+        regions.sort_by_key(|r| r.offset_x);
+        assert_eq!(
+            regions,
+            vec![
+                PointerRegion {
+                    mapping_id: Some(1),
+                    offset_x: 0,
+                    offset_y: 0,
+                    width: 1920,
+                    height: 1080,
+                },
+                PointerRegion {
+                    mapping_id: Some(2),
+                    offset_x: 1920,
+                    offset_y: 0,
+                    width: 2560,
+                    height: 1440,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_pointer_regions_shift_to_layout_origin_for_negative_offset_monitor() {
+        // Same layout as test_layout_bounds_monitor_left_of_origin: region offsets
+        // are unsigned on the wire, so the left-of-origin monitor's real x (-1920)
+        // must come out shifted to 0, and the primary's real x (0) shifted to 1920.
+        let mut mappings = HashMap::new();
+        mappings.insert(
+            1,
+            StreamOutputMapping {
+                stream_node_id: 1,
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+        );
+        mappings.insert(
+            2,
+            StreamOutputMapping {
+                stream_node_id: 2,
+                x: -1920,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+        );
+
+        let mut regions = WlrInputBackend::compute_pointer_regions(&mappings);
+        regions.sort_by_key(|r| r.mapping_id);
+        assert_eq!(
+            regions,
+            vec![
+                PointerRegion {
+                    mapping_id: Some(1),
+                    offset_x: 1920,
+                    offset_y: 0,
+                    width: 1920,
+                    height: 1080,
+                },
+                PointerRegion {
+                    mapping_id: Some(2),
+                    offset_x: 0,
+                    offset_y: 0,
+                    width: 1920,
+                    height: 1080,
+                },
+            ]
+        );
     }
 }

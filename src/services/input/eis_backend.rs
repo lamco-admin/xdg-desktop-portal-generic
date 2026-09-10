@@ -38,7 +38,7 @@ use reis::{
 
 use crate::{
     error::{PortalError, Result},
-    types::DeviceTypes,
+    types::{DeviceTypes, PointerRegion},
 };
 
 /// Per-session EIS state.
@@ -60,6 +60,13 @@ pub struct EisSession {
     /// forward the cached compositor keymap into a receiver-context
     /// keyboard device.
     shared_wayland_state: Option<Arc<std::sync::Mutex<crate::wayland::SharedWaylandState>>>,
+    /// Regions to advertise on a `PointerAbsolute`-capable device, one per known
+    /// output, read once at session-creation time
+    /// (`WlrInputBackend::pointer_regions`, which never returns empty: a single
+    /// fallback region covers the no-outputs-known-yet case, since it is a libei
+    /// implementation bug to advertise the absolute-pointer capability on a
+    /// virtual device without advertising at least one region).
+    pointer_regions: Vec<PointerRegion>,
 }
 
 enum SessionPhase {
@@ -103,6 +110,7 @@ impl EisSession {
     pub fn new(
         device_types: DeviceTypes,
         shared_wayland_state: Option<Arc<std::sync::Mutex<crate::wayland::SharedWaylandState>>>,
+        pointer_regions: Vec<PointerRegion>,
     ) -> Result<(Self, OwnedFd)> {
         let (server_socket, client_socket) = UnixStream::pair().map_err(|e| {
             PortalError::EisCreationFailed(format!("Failed to create socket pair: {e}"))
@@ -131,6 +139,7 @@ impl EisSession {
             },
             next_sequence: 0,
             shared_wayland_state,
+            pointer_regions,
         };
 
         Ok((session, client_fd))
@@ -252,11 +261,33 @@ impl EisSession {
         // keymap degrades gracefully (the client just gets raw keycodes
         // with no defined interpretation), it never fails the handshake.
         let shared_wayland_state = self.shared_wayland_state.clone();
+        // It is a libei implementation bug to advertise the absolute-pointer
+        // capability on a virtual device without advertising at least one region
+        // (`self.pointer_regions` is never empty, see `WlrInputBackend::pointer_regions`).
+        // Regions (and their optional `region_mapping_id`, which must precede the
+        // `region` event it tags) must be sent before `ei_device.done`, so like the
+        // keyboard keymap below, this has to happen in this construction closure.
+        let pointer_regions = self.pointer_regions.clone();
         let device = seat.add_device(
             Some("portal-device"),
             eis::device::DeviceType::Virtual,
             capabilities,
             move |device| {
+                if capabilities.contains(DeviceCapability::PointerAbsolute) {
+                    for region in &pointer_regions {
+                        if let Some(mapping_id) = region.mapping_id {
+                            device.device().region_mapping_id(&mapping_id.to_string());
+                        }
+                        device.device().region(
+                            region.offset_x,
+                            region.offset_y,
+                            region.width,
+                            region.height,
+                            1.0,
+                        );
+                    }
+                }
+
                 if !capabilities.contains(DeviceCapability::Keyboard) {
                     return;
                 }
@@ -689,7 +720,7 @@ mod tests {
 
     #[test]
     fn test_eis_session_creation() {
-        let (session, fd) = EisSession::new(DeviceTypes::all(), None).unwrap();
+        let (session, fd) = EisSession::new(DeviceTypes::all(), None, Vec::new()).unwrap();
         assert!(!session.is_active());
         // fd should be valid
         assert!(fd.as_raw_fd() >= 0);
@@ -697,13 +728,13 @@ mod tests {
 
     #[test]
     fn test_eis_session_new_is_not_receiver() {
-        let (session, _fd) = EisSession::new(DeviceTypes::all(), None).unwrap();
+        let (session, _fd) = EisSession::new(DeviceTypes::all(), None, Vec::new()).unwrap();
         assert!(!session.is_receiver());
     }
 
     #[test]
     fn test_receiver_methods_error_before_handshake_completes() {
-        let (mut session, _fd) = EisSession::new(DeviceTypes::all(), None).unwrap();
+        let (mut session, _fd) = EisSession::new(DeviceTypes::all(), None, Vec::new()).unwrap();
 
         assert!(session.start_emulating().is_err());
         assert!(session.stop_emulating().is_err());

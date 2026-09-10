@@ -117,6 +117,33 @@ pub struct StreamOutputMapping {
     pub height: u32,
 }
 
+/// One EIS region to advertise on a `PointerAbsolute` device: one output's geometry,
+/// shifted into the layout's own top-left-anchored coordinate space (see
+/// `WlrInputBackend::layout_bounds`), plus the PipeWire stream node ID a client can
+/// use to correlate this region with the matching ScreenCast stream via
+/// `ei_device.region_mapping_id`.
+///
+/// Public because [`EisSession::new`](crate::services::input::EisSession::new) takes
+/// a list of these directly, for a caller embedding the EIS backend on its own
+/// (rather than through the [`InputBackend`](crate::services::input::InputBackend)
+/// trait object, which computes them via `WlrInputBackend::pointer_regions`
+/// internally).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PointerRegion {
+    /// PipeWire stream node ID this region correlates with, if any. `None` only
+    /// for the no-outputs-known-yet fallback region, which has no real stream to
+    /// correlate with.
+    pub mapping_id: Option<u32>,
+    /// Region X offset in the layout's own coordinate space, in pixels.
+    pub offset_x: u32,
+    /// Region Y offset in the layout's own coordinate space, in pixels.
+    pub offset_y: u32,
+    /// Region width in pixels.
+    pub width: u32,
+    /// Region height in pixels.
+    pub height: u32,
+}
+
 /// A single InputCapture zone: one output's geometry in compositor-global
 /// coordinates.
 ///
