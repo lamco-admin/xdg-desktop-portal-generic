@@ -468,6 +468,20 @@ impl PortalBackend {
                                 });
                             }
                         }
+
+                        // Remove the session's own D-Bus object. `Session.Close()`
+                        // does this itself (`server.remove` in
+                        // `SessionInterface::close`), but an ungraceful
+                        // disconnect never calls `Close()`, so without this the
+                        // object stays registered on the bus after the owning
+                        // client, and its entry in `SessionManager`, are both
+                        // already gone -- a stale object a second client could
+                        // still address by path, even though every method on it
+                        // would now fail its own session-manager lookup.
+                        let _ = connection
+                            .object_server()
+                            .remove::<crate::dbus::SessionInterface, _>(&session.id)
+                            .await;
                     }
                 }
             }
