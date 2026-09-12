@@ -572,6 +572,7 @@ impl ExtCaptureState {
 
             if let Some(tx) = &self.frame_tx {
                 let frame = super::screencopy::RawFrame {
+                    node_id,
                     data,
                     width,
                     height,

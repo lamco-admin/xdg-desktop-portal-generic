@@ -51,6 +51,7 @@ use wayland_protocols::{
         relative_pointer::zv1::client::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
         text_input::zv3::client::zwp_text_input_manager_v3::ZwpTextInputManagerV3,
     },
+    xdg::xdg_output::zv1::client::zxdg_output_manager_v1::ZxdgOutputManagerV1,
 };
 use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1;
 use wayland_protocols_wlr::{
@@ -553,6 +554,17 @@ impl WaylandConnection {
             }
         }
 
+        // === xdg_output (real multi-monitor logical position) ===
+        match globals.bind::<ZxdgOutputManagerV1, _, _>(qh, 1..=3, ()) {
+            Ok(manager) => {
+                tracing::debug!("Bound zxdg_output_manager_v1");
+                state.xdg_output_manager = Some(manager);
+            }
+            Err(e) => {
+                tracing::debug!("zxdg_output_manager_v1 not available: {}", e);
+            }
+        }
+
         // === Outputs and protocol detection ===
         // Scan all globals to detect protocols and bind outputs
         let contents = globals.contents();
@@ -613,6 +625,9 @@ impl WaylandConnection {
 
             let bind_version = (*version).min(4);
             let output: WlOutput = registry.bind(*name, bind_version, qh, info.clone());
+            if let Some(ref xdg_output_manager) = state.xdg_output_manager {
+                xdg_output_manager.get_xdg_output(&output, qh, info.clone());
+            }
             state.outputs.push((output, info));
         }
 

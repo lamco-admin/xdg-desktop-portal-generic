@@ -47,6 +47,10 @@ use wayland_protocols::{
             zwp_text_input_v3::{self, ZwpTextInputV3},
         },
     },
+    xdg::xdg_output::zv1::client::{
+        zxdg_output_manager_v1::ZxdgOutputManagerV1,
+        zxdg_output_v1::{self, ZxdgOutputV1},
+    },
 };
 use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::{
     zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1,
@@ -181,6 +185,14 @@ pub struct WaylandState {
     pub keyboard: Option<WlKeyboard>,
     /// Known outputs with their info.
     pub outputs: Vec<(WlOutput, Arc<Mutex<OutputInfo>>)>,
+    /// `xdg_output` manager, used to read each output's real compositor-space
+    /// logical position. `wl_output.geometry`'s x/y (`OutputInfo::x`/`y`'s
+    /// other source) is legacy and reported as `(0, 0)` by wlroots and other
+    /// modern compositors regardless of actual multi-monitor layout -- this
+    /// is the protocol-correct source for real position. `None` when absent
+    /// (older compositor), in which case `OutputInfo` keeps whatever
+    /// `wl_output.geometry` reported.
+    pub xdg_output_manager: Option<ZxdgOutputManagerV1>,
 
     // === Screen capture ===
     /// wlr-screencopy frame capture state.
@@ -302,6 +314,9 @@ impl Dispatch<WlRegistry, GlobalListContents> for WaylandState {
                 }));
                 let bind_version = version.min(4);
                 let output: WlOutput = registry.bind(name, bind_version, qh, info.clone());
+                if let Some(ref xdg_output_manager) = state.xdg_output_manager {
+                    xdg_output_manager.get_xdg_output(&output, qh, info.clone());
+                }
                 state.outputs.push((output, info));
             }
             // Other Event::Global cases (pre-initialization, non-wl_output)
@@ -530,6 +545,18 @@ impl Dispatch<WlOutput, Arc<Mutex<OutputInfo>>> for WaylandState {
                     physical_height,
                     ..
                 } => {
+                    // wlroots and other modern compositors report (0, 0) here
+                    // unconditionally regardless of real layout -- legacy
+                    // wl_output.geometry was never extended for multi-monitor
+                    // position. `Dispatch<ZxdgOutputV1, _>` below sets x/y from
+                    // the real logical position when xdg_output is bound (every
+                    // output gets one, see `detect_and_bind_globals`); both
+                    // objects are created together and dispatched within the
+                    // same roundtrip before any consumer reads `OutputInfo`, so
+                    // whichever of the two fires last for a given output simply
+                    // needs to be xdg_output's -- true in practice since real
+                    // multi-monitor position only exists there in the first
+                    // place, never a value worth reverting to.
                     info.x = x;
                     info.y = y;
                     info.physical_width = physical_width;
@@ -574,6 +601,37 @@ impl Dispatch<WlOutput, Arc<Mutex<OutputInfo>>> for WaylandState {
                 _ => {}
             }
         }
+    }
+}
+
+impl Dispatch<ZxdgOutputV1, Arc<Mutex<OutputInfo>>> for WaylandState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ZxdgOutputV1,
+        event: <ZxdgOutputV1 as wayland_client::Proxy>::Event,
+        data: &Arc<Mutex<OutputInfo>>,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let Ok(mut info) = data.lock()
+            && let zxdg_output_v1::Event::LogicalPosition { x, y } = event
+        {
+            info.x = x;
+            info.y = y;
+        }
+    }
+}
+
+impl Dispatch<ZxdgOutputManagerV1, ()> for WaylandState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ZxdgOutputManagerV1,
+        _event: <ZxdgOutputManagerV1 as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        // No events
     }
 }
 

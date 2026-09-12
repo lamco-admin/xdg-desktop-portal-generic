@@ -246,6 +246,13 @@ pub struct ActiveCapture {
 /// Raw frame data sent through the direct frame channel.
 #[derive(Debug, Clone)]
 pub struct RawFrame {
+    /// The real per-output identifier (PipeWire node ID convention, matching
+    /// `StreamInfo::node_id`) this frame was captured from. A single shared
+    /// direct-frame channel multiplexes every monitor's captures together
+    /// (`ScreencopyState`/`ExtCaptureState` each hold one `frame_tx`), so
+    /// consumers need this to route or composite frames per monitor instead
+    /// of losing which output they came from.
+    pub node_id: u32,
     /// Pixel data, in whatever channel order `format_raw` describes -- not
     /// necessarily BGRx. See [`crate::types::wl_shm_format_needs_rb_swap`].
     pub data: Vec<u8>,
@@ -614,6 +621,7 @@ impl ScreencopyState {
             if let Some(tx) = &self.frame_tx {
                 // Direct channel path — send raw frame data to in-process consumer
                 let frame = RawFrame {
+                    node_id,
                     data,
                     width,
                     height,
