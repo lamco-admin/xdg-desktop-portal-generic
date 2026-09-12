@@ -1,0 +1,33 @@
+Needs sponsorship: yes (Greg Lamberson, not yet a Debian Maintainer/Developer).
+
+BLOCKED as of 2026-09-12, not ready to submit:
+
+1. Upstream's Cargo.toml pins `nix = "0.31"`. Debian's archive currently
+   carries rust-nix 0.30.1-1. This package will not build against the
+   archive until either (a) upstream widens the constraint to accept 0.30
+   (the same fix already applied to lamco-pipewire's own nix dependency,
+   see ~/lamco-admin/pipelines/debian-developer/DEBCARGO-SUBMISSIONS.md),
+   or (b) rust-nix 0.31 lands in unstable. Per Greg (2026-09-12): a fix for
+   this is in progress in another session, on both lamco-pipewire and
+   xdg-desktop-portal-generic itself, currently under testing. Do not
+   submit this packaging upstream until that fix is published and this
+   package's own Cargo.toml/Cargo.lock reflect it.
+
+2. The Build-Depends feature-combination package names for
+   librust-wayland-protocols-0.32 (+client, +staging, +unstable) have not
+   been cross-checked against what actually exists in the archive (no apt
+   index available in this session). Verify with `apt-cache search
+   librust-wayland-protocols` or an sbuild attempt before relying on this
+   control file.
+
+3. Never sbuild-verified. Per DEBCARGO-CONVENTIONS.md #0: a green cargo
+   build does not prove the binary's Depends resolve against the archive;
+   sbuild + lintian + a .deb installability check are the real gate here,
+   not anything done in this drafting pass.
+
+Everything else in debian/ (control, changelog, rules, copyright, install,
+watch, gbp.conf, source/format) is a first draft against the current
+archive and upstream's own README/Makefile install layout, cross-checked
+crate-by-crate against sources.debian.org on 2026-09-12: every direct
+dependency except nix (see #1 above) is already packaged in unstable at a
+version satisfying upstream's Cargo.toml.

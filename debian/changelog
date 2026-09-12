@@ -1,0 +1,5 @@
+xdg-desktop-portal-generic (0.9.0-1) UNRELEASED; urgency=medium
+
+  * Initial release. (Closes: #1132030)
+
+ -- Greg Lamberson <greg@lamco.io>  Sat, 12 Sep 2026 11:21:46 -0500

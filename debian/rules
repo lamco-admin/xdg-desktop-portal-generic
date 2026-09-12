@@ -1,0 +1,21 @@
+#!/usr/bin/make -f
+
+include /usr/share/rustc/architecture.mk
+
+export DEB_CARGO_CRATE=xdg-desktop-portal-generic_0.9.0
+export CARGO_HOME=$(CURDIR)/debian/cargo_home
+export DH_CARGO_USE_MIRROR=0
+
+%:
+	dh $@ --buildsystem cargo
+
+override_dh_auto_install:
+	dh_auto_install
+	# The cargo buildsystem installs the binary to usr/bin; upstream's own
+	# install layout (Makefile, README) puts it in libexec instead, matching
+	# the D-Bus service file's Exec= path and every other portal backend in
+	# the archive (xdg-desktop-portal-wlr, -gtk, etc.).
+	mkdir -p debian/xdg-desktop-portal-generic/usr/libexec
+	mv debian/xdg-desktop-portal-generic/usr/bin/xdg-desktop-portal-generic \
+		debian/xdg-desktop-portal-generic/usr/libexec/xdg-desktop-portal-generic
+	rmdir --ignore-fail-on-non-empty debian/xdg-desktop-portal-generic/usr/bin

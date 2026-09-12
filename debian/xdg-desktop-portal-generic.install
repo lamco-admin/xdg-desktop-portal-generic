@@ -1,0 +1,3 @@
+data/generic.portal usr/share/xdg-desktop-portal/portals/
+data/org.freedesktop.impl.portal.desktop.generic.service usr/share/dbus-1/services/
+data/xdg-desktop-portal-generic.service usr/lib/systemd/user/
