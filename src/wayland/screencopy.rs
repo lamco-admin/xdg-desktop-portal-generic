@@ -239,6 +239,34 @@ pub struct ActiveCapture {
     /// allowed. Set to "now" on every issued request; consulted by
     /// `request_next_frame`/`pump_paced_requests` to pace the capture loop.
     next_request_due: Instant,
+    /// Frames delivered for this capture. The first is always a plain
+    /// `copy()`, so it arrives at once and whole; later ones may use
+    /// `copy_with_damage()` (see [`ScreencopyState::set_copy_with_damage`]).
+    frames_delivered: u64,
+    /// Whether the current frame was asked for with `copy_with_damage()`, and
+    /// so carries `damage` events.
+    damage_requested: bool,
+    /// `damage` events received for the current frame.
+    pending_damage: Vec<DamageRect>,
+}
+
+impl ActiveCapture {
+    /// The current frame's damage, leaving none behind. Empty is the whole
+    /// frame: a plain copy, or more boxes than are worth tracking.
+    fn take_damage(&mut self) -> Vec<DamageRect> {
+        frame_damage(self.damage_requested, &mut self.pending_damage)
+    }
+}
+
+/// A frame's damage, leaving `pending` empty: the boxes when the copy asked for
+/// damage and there aren't too many of them, otherwise none (the whole frame).
+fn frame_damage(requested: bool, pending: &mut Vec<DamageRect>) -> Vec<DamageRect> {
+    if requested && pending.len() <= MAX_DAMAGE_RECTS {
+        std::mem::take(pending)
+    } else {
+        pending.clear();
+        Vec::new()
+    }
 }
 
 /// Central screencopy state, stored in WaylandState.
@@ -269,12 +297,12 @@ pub struct RawFrame {
     /// wrong channel order on any compositor that doesn't deliver xrgb8888
     /// (e.g. wlroots + virtio-gpu delivers xbgr8888).
     pub format_raw: u32,
-    /// Regions changed since the previous frame. Always empty on this
-    /// (wlr-screencopy) path -- see [`DamageRect`]'s own doc for why an
-    /// empty list means "treat the whole frame as damaged", which is
-    /// exactly this path's real, unavoidable behavior (only `copy`, never
-    /// `copy_with_damage`, is used here). Populated for real on the
-    /// `ext-image-copy-capture` path -- see `ext_capture.rs`.
+    /// Regions changed since the previous frame. Empty means "treat the whole
+    /// frame as damaged" (see [`DamageRect`]): on this (wlr-screencopy) path
+    /// that's a capture's first frame, any frame asked for with plain `copy`
+    /// (protocol version 1, or `copy_with_damage` turned off), and a frame
+    /// whose damage came as more rectangles than are worth tracking.
+    /// Populated on the `ext-image-copy-capture` path too, see `ext_capture.rs`.
     pub damage_regions: Vec<DamageRect>,
 }
 
@@ -319,7 +347,14 @@ pub struct ScreencopyState {
     /// channel. Pacing the request itself avoids that wasted work instead
     /// of discarding it after the fact.
     min_frame_interval: Duration,
+    /// Plain `copy()` for every frame, never `copy_with_damage()`. Off by
+    /// default, see [`ScreencopyState::set_copy_with_damage`].
+    plain_copy_only: bool,
 }
+
+/// More damage rectangles than this for one frame are reported as the whole
+/// frame: past that, tracking them costs the consumer more than it saves.
+const MAX_DAMAGE_RECTS: usize = 64;
 
 impl ScreencopyState {
     /// Set the minimum interval between capture requests. Zero disables
@@ -327,6 +362,23 @@ impl ScreencopyState {
     /// frames for this to take effect from the first paced request.
     pub fn set_min_frame_interval(&mut self, interval: Duration) {
         self.min_frame_interval = interval;
+    }
+
+    /// Whether frames after a capture's first are asked for with
+    /// `copy_with_damage()` (protocol version 2 and later). On (the default),
+    /// the compositor answers only once the output has changed, so a still
+    /// desktop costs neither side anything, and each frame says what changed.
+    /// With plain `copy()` the compositor renders and copies a frame for every
+    /// request, changed or not: on a still sway desktop that was 30 frames a
+    /// second, most of them dropped downstream.
+    ///
+    /// wlroots switches to a software cursor while a client asks for the
+    /// cursor in its frames, so cursor motion damages the output and still
+    /// produces frames. A compositor that draws a hardware cursor into the
+    /// copy without damaging the output would leave the cursor still in
+    /// captured frames under `copy_with_damage()`; turn it off for that one.
+    pub fn set_copy_with_damage(&mut self, enabled: bool) {
+        self.plain_copy_only = !enabled;
     }
     /// Start capturing an output.
     ///
@@ -374,6 +426,9 @@ impl ScreencopyState {
             screenshot_reply: None,
             capture_started: None,
             next_request_due: Instant::now() + self.min_frame_interval,
+            frames_delivered: 0,
+            damage_requested: false,
+            pending_damage: Vec::new(),
         };
 
         self.captures.insert(node_id, capture);
@@ -419,6 +474,9 @@ impl ScreencopyState {
             screenshot_reply: Some(reply),
             capture_started: None,
             next_request_due: Instant::now(),
+            frames_delivered: 0,
+            damage_requested: false,
+            pending_damage: Vec::new(),
         };
 
         self.captures.insert(screenshot_id, capture);
@@ -489,6 +547,7 @@ impl ScreencopyState {
             return;
         };
         let shm = shm.clone();
+        let damage_available = self.manager_version >= 2 && !self.plain_copy_only;
 
         let Some(capture) = self.captures.get_mut(&node_id) else {
             return;
@@ -542,9 +601,31 @@ impl ScreencopyState {
         }
         if let (Some(frame), Some(buf)) = (&capture.pending_frame, &capture.shm_buffer) {
             capture.capture_started = Some(std::time::Instant::now());
-            frame.copy(&buf.buffer);
+            // A capture's first frame and a screenshot are wanted now, damage
+            // or not; after that the compositor answers once something changed.
+            let with_damage = damage_available
+                && capture.frames_delivered > 0
+                && capture.screenshot_reply.is_none();
+            capture.damage_requested = with_damage;
+            capture.pending_damage.clear();
+            if with_damage {
+                frame.copy_with_damage(&buf.buffer);
+            } else {
+                frame.copy(&buf.buffer);
+            }
             capture.copy_sent = true;
-            tracing::trace!(node_id, "Sent frame.copy() to compositor");
+            tracing::trace!(node_id, with_damage, "Sent frame copy to compositor");
+        }
+    }
+
+    /// Handle a `damage` event: one changed box of the frame being copied, sent
+    /// before `ready` when the copy was `copy_with_damage()`.
+    pub fn on_frame_damage(&mut self, node_id: u32, rect: DamageRect) {
+        let Some(capture) = self.captures.get_mut(&node_id) else {
+            return;
+        };
+        if capture.pending_damage.len() <= MAX_DAMAGE_RECTS {
+            capture.pending_damage.push(rect);
         }
     }
 
@@ -573,7 +654,7 @@ impl ScreencopyState {
             );
         }
         // Read pixel data from the SHM buffer
-        let (data, width, height, stride, format_raw, is_screenshot) = {
+        let (data, width, height, stride, format_raw, is_screenshot, damage_regions) = {
             let Some(capture) = self.captures.get_mut(&node_id) else {
                 return;
             };
@@ -582,6 +663,8 @@ impl ScreencopyState {
             if let Some(frame) = capture.pending_frame.take() {
                 frame.destroy();
             }
+            capture.frames_delivered += 1;
+            let damage_regions = capture.take_damage();
 
             let Some(buf) = &capture.shm_buffer else {
                 tracing::error!(node_id, "Frame ready but no SHM buffer");
@@ -599,7 +682,15 @@ impl ScreencopyState {
             let format_raw = buf.format.format_raw;
             let is_screenshot = capture.screenshot_reply.is_some();
 
-            (data, width, height, stride, format_raw, is_screenshot)
+            (
+                data,
+                width,
+                height,
+                stride,
+                format_raw,
+                is_screenshot,
+                damage_regions,
+            )
         };
 
         if is_screenshot {
@@ -618,6 +709,9 @@ impl ScreencopyState {
             }
         } else {
             // Continuous capture: send frame and request next
+            // Zero damage boxes is a whole-frame update, counted as one.
+            let damage_region_count =
+                u32::try_from(damage_regions.len().max(1)).unwrap_or(u32::MAX);
             if let Some(tx) = &self.frame_tx {
                 // Direct channel path — send raw frame data to in-process consumer
                 let frame = RawFrame {
@@ -627,7 +721,7 @@ impl ScreencopyState {
                     height,
                     stride,
                     format_raw,
-                    damage_regions: Vec::new(),
+                    damage_regions,
                 };
                 if tx.send(frame).is_err() {
                     tracing::warn!(node_id, "Direct frame channel closed");
@@ -649,7 +743,7 @@ impl ScreencopyState {
                     capture_latency: capture_latency.unwrap_or(std::time::Duration::ZERO),
                     frame_size_bytes: frame_size,
                     frame_number: self.frame_count,
-                    damage_region_count: 1, // wlr-screencopy sends one damage rect
+                    damage_region_count,
                 });
             }
 
@@ -806,5 +900,40 @@ mod tests {
         // Should not panic
         state.stop_capture(42);
         assert!(state.captures.is_empty());
+    }
+
+    #[test]
+    fn copy_with_damage_is_the_default() {
+        let mut state = ScreencopyState::default();
+        assert!(!state.plain_copy_only);
+        state.set_copy_with_damage(false);
+        assert!(state.plain_copy_only);
+    }
+
+    #[test]
+    fn frame_damage_passes_boxes_only_from_a_damage_copy() {
+        let rect = DamageRect {
+            x: 10,
+            y: 20,
+            width: 30,
+            height: 40,
+        };
+
+        let mut pending = vec![rect];
+        assert_eq!(frame_damage(true, &mut pending), vec![rect]);
+        assert_eq!(pending, Vec::new());
+
+        // A plain copy has no damage to report: the whole frame.
+        let mut pending = vec![rect];
+        assert_eq!(frame_damage(false, &mut pending), Vec::new());
+        assert_eq!(pending, Vec::new());
+
+        // on_frame_damage keeps one box past the limit to mark the overflow.
+        let mut pending = vec![rect; MAX_DAMAGE_RECTS + 1];
+        assert_eq!(frame_damage(true, &mut pending), Vec::new());
+        assert_eq!(pending, Vec::new());
+
+        let mut pending = vec![rect; MAX_DAMAGE_RECTS];
+        assert_eq!(frame_damage(true, &mut pending).len(), MAX_DAMAGE_RECTS);
     }
 }

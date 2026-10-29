@@ -783,9 +783,23 @@ impl Dispatch<ZwlrScreencopyFrameV1, u32> for WaylandState {
                 state.screencopy.on_frame_failed(node_id, qh);
             }
 
-            zwlr_screencopy_frame_v1::Event::Damage { .. } => {
-                // Damage info — we capture the full frame each time for simplicity
-                tracing::trace!(node_id, "Screencopy frame damage received");
+            zwlr_screencopy_frame_v1::Event::Damage {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                // u32 on the wire; an output is far smaller than i32::MAX.
+                let to_i32 = |v: u32| i32::try_from(v).unwrap_or(i32::MAX);
+                state.screencopy.on_frame_damage(
+                    node_id,
+                    crate::types::DamageRect {
+                        x: to_i32(x),
+                        y: to_i32(y),
+                        width: to_i32(width),
+                        height: to_i32(height),
+                    },
+                );
             }
 
             zwlr_screencopy_frame_v1::Event::LinuxDmabuf { .. } => {

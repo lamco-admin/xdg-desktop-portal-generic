@@ -632,6 +632,14 @@ impl WaylandConnection {
         self.state.ext_capture.set_min_frame_interval(interval);
     }
 
+    /// Whether wlr-screencopy frames after a capture's first wait for the
+    /// output to change (`copy_with_damage`). On by default; see
+    /// [`screencopy::ScreencopyState::set_copy_with_damage`] for when to turn
+    /// it off. ext-image-copy-capture always works this way.
+    pub fn set_screencopy_damage(&mut self, enabled: bool) {
+        self.state.screencopy.set_copy_with_damage(enabled);
+    }
+
     /// Get the queue handle for creating protocol objects.
     pub fn queue_handle(&self) -> &QueueHandle<WaylandState> {
         &self.queue_handle
