@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `WaylandConnection::set_screencopy_damage(enabled)`. Damage-driven capture
+  is on by default; `false` restores a plain copy for every frame, for a
+  compositor that draws a hardware cursor into the copy without damaging the
+  output.
+
+### Fixed
+
+- **wlr-screencopy no longer captures an unchanged output at the full frame
+  rate.** Frames after a capture's first use `copy_with_damage` when the
+  manager is version 2 or later, so the compositor answers only once the
+  output changes, and its damage boxes arrive in `RawFrame::damage_regions`
+  (more than 64 are reported as the whole frame). The first frame and
+  screenshots still use a plain copy. On a still desktop with a client
+  connected, lamco-rdp-server's CPU went from 3.4 to 0.7 percent on niri and
+  from 7.9 to 0.8 on Wayfire.
+
+### Changed
+
+- tokio 1.54 in the lockfile, for RUSTSEC-2026-0386 (`AsyncFd` constructors).
+
 ## [1.0.0] - 2026-09-30
 
 ### Breaking
