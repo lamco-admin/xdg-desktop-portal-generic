@@ -821,7 +821,7 @@ mod tests {
 
     #[test]
     fn test_chunk_utf8_empty_yields_no_chunks() {
-        assert!(chunk_utf8("", 254).is_empty());
+        assert_eq!(chunk_utf8("", 254), Vec::<&str>::new());
     }
 
     #[test]

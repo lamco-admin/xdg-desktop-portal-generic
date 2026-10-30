@@ -662,13 +662,19 @@ mod tests {
     #[test]
     fn test_get_mime_types_empty_options() {
         let options: HashMap<String, OwnedValue> = HashMap::new();
-        assert!(ClipboardInterface::get_mime_types(&options).is_empty());
+        assert_eq!(
+            ClipboardInterface::get_mime_types(&options),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
     fn test_get_mime_types_no_mime_types_key() {
         let mut options: HashMap<String, OwnedValue> = HashMap::new();
         options.insert("other_key".to_string(), OwnedValue::from(42u32));
-        assert!(ClipboardInterface::get_mime_types(&options).is_empty());
+        assert_eq!(
+            ClipboardInterface::get_mime_types(&options),
+            Vec::<String>::new()
+        );
     }
 }

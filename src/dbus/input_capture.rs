@@ -1147,7 +1147,7 @@ mod tests {
         let barriers = vec![barrier_dict(1, (0, 100, 1920, 100))];
         let (accepted, failed) = InputCaptureInterface::partition_barriers(&barriers, 5, 5);
         assert_eq!(accepted.len(), 1);
-        assert!(failed.is_empty());
+        assert_eq!(failed, Vec::<u32>::new());
         assert_eq!(accepted[0].barrier_id, 1);
     }
 
@@ -1155,7 +1155,7 @@ mod tests {
     fn test_partition_barriers_rejects_diagonal() {
         let barriers = vec![barrier_dict(1, (0, 0, 100, 100))];
         let (accepted, failed) = InputCaptureInterface::partition_barriers(&barriers, 5, 5);
-        assert!(accepted.is_empty());
+        assert_eq!(accepted, Vec::<PointerBarrier>::new());
         assert_eq!(failed, vec![1]);
     }
 
@@ -1163,7 +1163,7 @@ mod tests {
     fn test_partition_barriers_rejects_zero_id() {
         let barriers = vec![barrier_dict(0, (0, 100, 1920, 100))];
         let (accepted, failed) = InputCaptureInterface::partition_barriers(&barriers, 5, 5);
-        assert!(accepted.is_empty());
+        assert_eq!(accepted, Vec::<PointerBarrier>::new());
         assert_eq!(failed, vec![0]);
     }
 
@@ -1185,7 +1185,7 @@ mod tests {
             barrier_dict(2, (0, 200, 1920, 200)),
         ];
         let (accepted, failed) = InputCaptureInterface::partition_barriers(&barriers, 4, 5);
-        assert!(accepted.is_empty());
+        assert_eq!(accepted, Vec::<PointerBarrier>::new());
         assert_eq!(failed.len(), 2);
         assert!(failed.contains(&1));
         assert!(failed.contains(&2));

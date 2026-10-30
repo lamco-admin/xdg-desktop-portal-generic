@@ -296,10 +296,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "effective_fps returns an exact 0.0 by early-return when fewer than two frames are recorded"
-    )]
     fn effective_fps_is_zero_below_two_frames() {
         let mut m = CaptureMetrics::new(CaptureProtocolType::WlrScreencopy);
         assert_eq!(m.effective_fps(), 0.0);

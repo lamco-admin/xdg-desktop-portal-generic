@@ -684,7 +684,7 @@ mod tests {
     #[test]
     fn test_shared_clipboard_state_default() {
         let state = Shared::default();
-        assert!(state.mime_types.is_empty());
+        assert_eq!(state.mime_types, Vec::<String>::new());
         assert_eq!(state.serial, 0);
         assert!(state.on_change.is_none());
     }
@@ -756,7 +756,7 @@ mod tests {
         let called_clone = Arc::clone(&called);
         if let Ok(mut shared) = state.shared_state.lock() {
             shared.on_change = Some(Arc::new(move |types: Vec<String>| {
-                assert!(types.is_empty());
+                assert_eq!(types, Vec::<String>::new());
                 *called_clone.lock().unwrap() = true;
             }));
         }
@@ -764,7 +764,10 @@ mod tests {
         state.on_selection_cleared();
 
         assert!(*called.lock().unwrap());
-        assert!(state.shared_state.lock().unwrap().mime_types.is_empty());
+        assert_eq!(
+            state.shared_state.lock().unwrap().mime_types,
+            Vec::<String>::new()
+        );
         assert_eq!(state.shared_state.lock().unwrap().serial, 1);
     }
 
@@ -908,7 +911,7 @@ mod tests {
         state.on_source_send("image/png", write);
 
         state.on_source_cancelled();
-        assert!(read_all(read).is_empty());
+        assert_eq!(read_all(read), Vec::<u8>::new());
         // An answer for the lost selection is ignored.
         state.complete_transfer(1, Some(b"late".to_vec()));
         assert!(state.source_data.is_empty());
@@ -919,7 +922,7 @@ mod tests {
         let (mut state, requests) = state_with_transfer_callback();
         let (read, write) = nix::unistd::pipe().unwrap();
         state.on_source_send("text/html", write);
-        assert!(read_all(read).is_empty());
+        assert_eq!(read_all(read), Vec::<u8>::new());
         assert!(requests.lock().unwrap().is_empty());
     }
 }

@@ -1222,7 +1222,10 @@ mod tests {
     fn test_get_input_capture_zones_filters_incomplete() {
         let state = WaylandState::default();
         // No outputs, no zones
-        assert!(state.get_input_capture_zones().is_empty());
+        assert_eq!(
+            state.get_input_capture_zones(),
+            Vec::<InputCaptureZone>::new()
+        );
     }
 
     #[test]

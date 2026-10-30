@@ -658,7 +658,7 @@ mod tests {
     #[test]
     fn test_pointer_barriers_replace() {
         let mut session = test_session();
-        assert!(session.input_capture_barriers.is_empty());
+        assert_eq!(session.input_capture_barriers, Vec::<PointerBarrier>::new());
 
         let barrier = crate::types::PointerBarrier {
             barrier_id: 1,
@@ -673,7 +673,7 @@ mod tests {
 
         // Replacing with an empty set clears it
         session.set_pointer_barriers(vec![]);
-        assert!(session.input_capture_barriers.is_empty());
+        assert_eq!(session.input_capture_barriers, Vec::<PointerBarrier>::new());
     }
 
     #[test]

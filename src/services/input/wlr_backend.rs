@@ -1689,11 +1689,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "scale is an exact `as f32` cast of a small integer (1 or 2), never \
-                  computed via arithmetic that could introduce rounding error"
-    )]
     fn test_pointer_regions_carries_each_outputs_own_scale() {
         // A mixed-DPI layout: a 2x HiDPI primary next to a 1x secondary.
         // Each region must carry its own output's scale, not a shared or
