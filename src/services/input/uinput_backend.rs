@@ -164,14 +164,14 @@ impl UinputPointerBackend {
     }
 
     fn maybe_emit_health(&self) {
-        if self.events_forwarded.is_multiple_of(100) {
-            if let Some(ref health_tx) = self.health_tx {
-                let _ = health_tx.try_send(crate::health::PortalHealthEvent::InputBatch {
-                    events_forwarded: self.events_forwarded,
-                    events_failed: self.events_failed,
-                    protocol: crate::health::InputProtocolType::Uinput,
-                });
-            }
+        if self.events_forwarded.is_multiple_of(100)
+            && let Some(ref health_tx) = self.health_tx
+        {
+            let _ = health_tx.try_send(crate::health::PortalHealthEvent::InputBatch {
+                events_forwarded: self.events_forwarded,
+                events_failed: self.events_failed,
+                protocol: crate::health::InputProtocolType::Uinput,
+            });
         }
     }
 }

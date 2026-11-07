@@ -393,14 +393,14 @@ impl InputBackend for EisBridgeBackend {
         // Drop any events staged since the last frame -- they were never
         // atomically committed, so discarding rather than flushing them
         // unframed is correct.
-        if let Some(dropped) = self.pending_events.remove(session_id) {
-            if !dropped.is_empty() {
-                tracing::warn!(
-                    session_id = %session_id,
-                    count = dropped.len(),
-                    "Dropping unframed pending EIS events on session teardown"
-                );
-            }
+        if let Some(dropped) = self.pending_events.remove(session_id)
+            && !dropped.is_empty()
+        {
+            tracing::warn!(
+                session_id = %session_id,
+                count = dropped.len(),
+                "Dropping unframed pending EIS events on session teardown"
+            );
         }
 
         // Clean up wlr virtual devices
@@ -467,21 +467,20 @@ impl InputBackend for EisBridgeBackend {
                                 // The client's frame boundary: everything staged
                                 // since the last one must land on the compositor
                                 // as one atomic unit, not as separate flushes.
-                                if let Some(batch) = self.pending_events.remove(session_id) {
-                                    if !batch.is_empty() {
-                                        if let Err(e) =
-                                            self.wlr.inject_event_batch(session_id, &batch)
-                                        {
-                                            tracing::warn!(
-                                                session_id = %session_id,
-                                                error = %e,
-                                                count = batch.len(),
-                                                "Failed to forward EIS frame batch to wlr"
-                                            );
-                                        }
-                                        for event in batch {
-                                            all_events.push((session_id.clone(), event));
-                                        }
+                                if let Some(batch) = self.pending_events.remove(session_id)
+                                    && !batch.is_empty()
+                                {
+                                    if let Err(e) = self.wlr.inject_event_batch(session_id, &batch)
+                                    {
+                                        tracing::warn!(
+                                            session_id = %session_id,
+                                            error = %e,
+                                            count = batch.len(),
+                                            "Failed to forward EIS frame batch to wlr"
+                                        );
+                                    }
+                                    for event in batch {
+                                        all_events.push((session_id.clone(), event));
                                     }
                                 }
                             }

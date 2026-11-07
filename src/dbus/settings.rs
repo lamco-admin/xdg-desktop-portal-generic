@@ -18,11 +18,7 @@
 
 use std::collections::HashMap;
 
-use zbus::{
-    interface,
-    object_server::SignalEmitter,
-    zvariant::{OwnedValue, Value},
-};
+use zbus::{OwnedVariant, Variant, interface, object_server::SignalEmitter};
 
 /// The freedesktop appearance namespace.
 const NS_APPEARANCE: &str = "org.freedesktop.appearance";
@@ -30,7 +26,7 @@ const NS_APPEARANCE: &str = "org.freedesktop.appearance";
 /// Settings portal interface implementation.
 pub struct SettingsInterface {
     /// Cached settings organized by namespace → key → value.
-    settings: HashMap<String, HashMap<String, OwnedValue>>,
+    settings: HashMap<String, HashMap<String, OwnedVariant>>,
 }
 
 impl Default for SettingsInterface {
@@ -48,28 +44,28 @@ impl SettingsInterface {
     }
 
     /// Read appearance settings from environment variables and defaults.
-    fn read_appearance_settings() -> HashMap<String, OwnedValue> {
+    fn read_appearance_settings() -> HashMap<String, OwnedVariant> {
         let mut appearance = HashMap::new();
 
         // color-scheme: 0=default, 1=dark, 2=light
         let color_scheme = Self::detect_color_scheme();
-        appearance.insert("color-scheme".to_string(), OwnedValue::from(color_scheme));
+        appearance.insert("color-scheme".to_string(), OwnedVariant::from(color_scheme));
 
         // accent-color: (r, g, b) as doubles
         let (r, g, b) = Self::detect_accent_color();
-        if let Ok(val) = OwnedValue::try_from(Value::from((r, g, b))) {
+        if let Ok(val) = OwnedVariant::try_from(Variant::from((r, g, b))) {
             appearance.insert("accent-color".to_string(), val);
         }
 
         // contrast: 0=default, 1=high
         let contrast = Self::detect_contrast();
-        appearance.insert("contrast".to_string(), OwnedValue::from(contrast));
+        appearance.insert("contrast".to_string(), OwnedVariant::from(contrast));
 
         // reduced-motion: 0=normal, 1=reduced
         let reduced_motion = Self::detect_reduced_motion();
         appearance.insert(
             "reduced-motion".to_string(),
-            OwnedValue::from(reduced_motion),
+            OwnedVariant::from(reduced_motion),
         );
 
         appearance
@@ -83,19 +79,18 @@ impl SettingsInterface {
     /// 3. Default (0 = no preference)
     fn detect_color_scheme() -> u32 {
         // Explicit override
-        if let Ok(val) = std::env::var("XDP_GENERIC_COLOR_SCHEME") {
-            if let Ok(n) = val.parse::<u32>() {
-                if n <= 2 {
-                    return n;
-                }
-            }
+        if let Ok(val) = std::env::var("XDP_GENERIC_COLOR_SCHEME")
+            && let Ok(n) = val.parse::<u32>()
+            && n <= 2
+        {
+            return n;
         }
 
         // Detect from GTK_THEME
-        if let Ok(theme) = std::env::var("GTK_THEME") {
-            if theme.to_lowercase().contains("dark") {
-                return 1; // prefer dark
-            }
+        if let Ok(theme) = std::env::var("GTK_THEME")
+            && theme.to_lowercase().contains("dark")
+        {
+            return 1; // prefer dark
         }
 
         0 // no preference
@@ -108,14 +103,14 @@ impl SettingsInterface {
     fn detect_accent_color() -> (f64, f64, f64) {
         if let Ok(val) = std::env::var("XDP_GENERIC_ACCENT_COLOR") {
             let parts: Vec<&str> = val.split(',').collect();
-            if parts.len() == 3 {
-                if let (Ok(r), Ok(g), Ok(b)) = (
+            if parts.len() == 3
+                && let (Ok(r), Ok(g), Ok(b)) = (
                     parts[0].trim().parse::<f64>(),
                     parts[1].trim().parse::<f64>(),
                     parts[2].trim().parse::<f64>(),
-                ) {
-                    return (r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0));
-                }
+                )
+            {
+                return (r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0));
             }
         }
 
@@ -125,12 +120,11 @@ impl SettingsInterface {
 
     /// Detect contrast preference.
     fn detect_contrast() -> u32 {
-        if let Ok(val) = std::env::var("XDP_GENERIC_CONTRAST") {
-            if let Ok(n) = val.parse::<u32>() {
-                if n <= 1 {
-                    return n;
-                }
-            }
+        if let Ok(val) = std::env::var("XDP_GENERIC_CONTRAST")
+            && let Ok(n) = val.parse::<u32>()
+            && n <= 1
+        {
+            return n;
         }
         0 // default contrast
     }
@@ -139,12 +133,11 @@ impl SettingsInterface {
     ///
     /// Returns 0 (normal animations) or 1 (prefer reduced motion).
     fn detect_reduced_motion() -> u32 {
-        if let Ok(val) = std::env::var("XDP_GENERIC_REDUCED_MOTION") {
-            if let Ok(n) = val.parse::<u32>() {
-                if n <= 1 {
-                    return n;
-                }
-            }
+        if let Ok(val) = std::env::var("XDP_GENERIC_REDUCED_MOTION")
+            && let Ok(n) = val.parse::<u32>()
+            && n <= 1
+        {
+            return n;
         }
         0 // normal animations
     }
@@ -174,8 +167,8 @@ impl SettingsInterface {
         &mut self,
         namespace: &str,
         key: &str,
-        value: OwnedValue,
-    ) -> Option<OwnedValue> {
+        value: OwnedVariant,
+    ) -> Option<OwnedVariant> {
         let ns = self.settings.entry(namespace.to_string()).or_default();
         ns.insert(key.to_string(), value)
     }
@@ -184,7 +177,7 @@ impl SettingsInterface {
     ///
     /// Returns a list of `(namespace, key, new_value)` tuples for each
     /// setting that differs from the currently cached value.
-    pub fn refresh_from_env(&mut self) -> Vec<(String, String, OwnedValue)> {
+    pub fn refresh_from_env(&mut self) -> Vec<(String, String, OwnedVariant)> {
         let fresh = Self::read_appearance_settings();
         let mut changes = Vec::new();
 
@@ -218,7 +211,7 @@ impl SettingsInterface {
         clippy::unused_async_trait_impl,
         reason = "zbus interface requires async"
     )]
-    async fn read(&self, namespace: &str, key: &str) -> zbus::fdo::Result<OwnedValue> {
+    async fn read(&self, namespace: &str, key: &str) -> zbus::fdo::Result<OwnedVariant> {
         tracing::debug!(namespace = namespace, key = key, "Settings.Read called");
 
         let value = self
@@ -247,7 +240,7 @@ impl SettingsInterface {
     async fn read_all(
         &self,
         namespaces: Vec<&str>,
-    ) -> zbus::fdo::Result<HashMap<String, HashMap<String, OwnedValue>>> {
+    ) -> zbus::fdo::Result<HashMap<String, HashMap<String, OwnedVariant>>> {
         tracing::debug!(
             namespaces = ?namespaces,
             "Settings.ReadAll called"
@@ -278,7 +271,7 @@ impl SettingsInterface {
         signal_emitter: &SignalEmitter<'_>,
         namespace: &str,
         key: &str,
-        value: OwnedValue,
+        value: OwnedVariant,
     ) -> zbus::Result<()>;
 
     // === Properties ===
@@ -384,7 +377,7 @@ mod tests {
     #[test]
     fn test_update_setting() {
         let mut iface = SettingsInterface::new();
-        let old = iface.update_setting(NS_APPEARANCE, "color-scheme", OwnedValue::from(1u32));
+        let old = iface.update_setting(NS_APPEARANCE, "color-scheme", OwnedVariant::from(1u32));
         assert!(old.is_some());
 
         // Verify the update took effect
@@ -396,7 +389,7 @@ mod tests {
     #[test]
     fn test_update_setting_new_namespace() {
         let mut iface = SettingsInterface::new();
-        let old = iface.update_setting("com.custom", "my-key", OwnedValue::from(42u32));
+        let old = iface.update_setting("com.custom", "my-key", OwnedVariant::from(42u32));
         assert!(old.is_none());
 
         assert!(iface.settings.contains_key("com.custom"));

@@ -685,10 +685,10 @@ impl InputCaptureBarrierState {
         let Some(barrier_surface) = self.surfaces.get_mut(&(session_id, barrier_id)) else {
             return;
         };
-        if barrier_surface.relative_pointer.is_none() {
-            if let Some(locked) = barrier_surface.locked_pointer.take() {
-                locked.destroy();
-            }
+        if barrier_surface.relative_pointer.is_none()
+            && let Some(locked) = barrier_surface.locked_pointer.take()
+        {
+            locked.destroy();
         }
     }
 
@@ -767,11 +767,10 @@ impl InputCaptureBarrierState {
         time_usec: u64,
     ) {
         if let Some(barrier_surface) = self.surfaces.get_mut(&(session_id.to_string(), barrier_id))
+            && let Some((x, y)) = &mut barrier_surface.last_cursor_position
         {
-            if let Some((x, y)) = &mut barrier_surface.last_cursor_position {
-                *x += dx;
-                *y += dy;
-            }
+            *x += dx;
+            *y += dy;
         }
         self.send_activation_event(InputCaptureActivationEvent::Motion {
             session_id: session_id.to_string(),
@@ -816,10 +815,10 @@ impl InputCaptureBarrierState {
     /// that held focus -- composed text only makes sense while we
     /// genuinely hold keyboard focus.
     pub fn on_keyboard_leave(&mut self) {
-        if let Some(key) = self.keyboard_focus.take() {
-            if let Some(barrier_surface) = self.surfaces.get_mut(&key) {
-                destroy_text_input_mut(barrier_surface);
-            }
+        if let Some(key) = self.keyboard_focus.take()
+            && let Some(barrier_surface) = self.surfaces.get_mut(&key)
+        {
+            destroy_text_input_mut(barrier_surface);
         }
     }
 

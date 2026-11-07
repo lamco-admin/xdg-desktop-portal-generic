@@ -5,10 +5,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use tokio::sync::Mutex;
-use zbus::{
-    interface,
-    zvariant::{self, ObjectPath, OwnedValue, Value},
-};
+use zbus::{ObjectPath, OwnedFd, OwnedVariant, Variant, interface};
 
 use super::{Response, empty_results, get_option_bool, get_option_u32};
 use crate::{
@@ -48,24 +45,24 @@ impl ScreenCastInterface {
     }
 
     /// Extract `persist_mode` from options.
-    fn get_persist_mode(options: &HashMap<String, OwnedValue>) -> PersistMode {
+    fn get_persist_mode(options: &HashMap<String, OwnedVariant>) -> PersistMode {
         get_option_u32(options, "persist_mode").map_or(PersistMode::None, PersistMode::from_dbus)
     }
 
     /// Extract source types from options.
-    fn get_source_types(options: &HashMap<String, OwnedValue>) -> Vec<SourceType> {
+    fn get_source_types(options: &HashMap<String, OwnedVariant>) -> Vec<SourceType> {
         get_option_u32(options, "types")
             .map_or_else(|| vec![SourceType::Monitor], SourceType::from_bits)
     }
 
     /// Extract cursor mode from options.
-    fn get_cursor_mode(options: &HashMap<String, OwnedValue>) -> CursorMode {
+    fn get_cursor_mode(options: &HashMap<String, OwnedVariant>) -> CursorMode {
         get_option_u32(options, "cursor_mode")
             .map_or_else(CursorMode::default, CursorMode::from_bits)
     }
 
     /// Extract multiple sources flag.
-    fn get_multiple(options: &HashMap<String, OwnedValue>) -> bool {
+    fn get_multiple(options: &HashMap<String, OwnedVariant>) -> bool {
         get_option_bool(options, "multiple").unwrap_or(false)
     }
 
@@ -74,11 +71,11 @@ impl ScreenCastInterface {
     /// The `restore_data` option is a `(suv)` tuple: (vendor, version, data).
     /// We only accept vendor `"generic"` and version `1`. The data variant
     /// contains a string array of output names.
-    fn parse_restore_data(options: &HashMap<String, OwnedValue>) -> Option<RestoreData> {
+    fn parse_restore_data(options: &HashMap<String, OwnedVariant>) -> Option<RestoreData> {
         let rd = options.get("restore_data")?;
         // Try to decode the (suv) structure
-        let value: &Value<'_> = rd.downcast_ref().ok()?;
-        if let Value::Structure(s) = value {
+        let value: &Variant<'_> = rd.downcast_ref().ok()?;
+        if let Variant::Structure(s) = value {
             let fields = s.fields();
             if fields.len() >= 3 {
                 let vendor: &str = fields[0].downcast_ref().ok()?;
@@ -92,25 +89,25 @@ impl ScreenCastInterface {
                     return None;
                 }
                 // Data variant: try to extract as array of strings
-                if let Value::Value(inner) = &fields[2] {
-                    if let Value::Array(arr) = inner.as_ref() {
-                        let names: Vec<String> = arr
-                            .iter()
-                            .filter_map(|v| {
-                                if let Value::Str(s) = v {
-                                    Some(s.to_string())
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect();
-                        if !names.is_empty() {
-                            return Some(RestoreData {
-                                vendor: vendor.to_string(),
-                                version,
-                                output_names: names,
-                            });
-                        }
+                if let Variant::Variant(inner) = &fields[2]
+                    && let Variant::Array(arr) = inner.as_ref()
+                {
+                    let names: Vec<String> = arr
+                        .iter()
+                        .filter_map(|v| {
+                            if let Variant::Str(s) = v {
+                                Some(s.to_string())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    if !names.is_empty() {
+                        return Some(RestoreData {
+                            vendor: vendor.to_string(),
+                            version,
+                            output_names: names,
+                        });
                     }
                 }
             }
@@ -126,36 +123,36 @@ impl ScreenCastInterface {
     /// re-follow the stream across output reconfiguration.
     #[expect(
         clippy::expect_used,
-        reason = "infallible zvariant Value-to-OwnedValue conversions"
+        reason = "infallible zvariant Variant-to-OwnedVariant conversions"
     )]
-    fn build_stream_results(streams: &[StreamInfo]) -> HashMap<String, OwnedValue> {
-        let stream_data: Vec<(u32, HashMap<String, OwnedValue>)> = streams
+    fn build_stream_results(streams: &[StreamInfo]) -> HashMap<String, OwnedVariant> {
+        let stream_data: Vec<(u32, HashMap<String, OwnedVariant>)> = streams
             .iter()
             .map(|s| {
-                let mut props: HashMap<String, OwnedValue> = HashMap::new();
+                let mut props: HashMap<String, OwnedVariant> = HashMap::new();
                 props.insert(
                     "position".to_string(),
-                    OwnedValue::try_from(Value::from((s.position.0, s.position.1)))
-                        .expect("tuple Value converts to OwnedValue"),
+                    OwnedVariant::try_from(Variant::from((s.position.0, s.position.1)))
+                        .expect("tuple Variant converts to OwnedVariant"),
                 );
                 props.insert(
                     "size".to_string(),
-                    OwnedValue::try_from(Value::from((s.size.0, s.size.1)))
-                        .expect("tuple Value converts to OwnedValue"),
+                    OwnedVariant::try_from(Variant::from((s.size.0, s.size.1)))
+                        .expect("tuple Variant converts to OwnedVariant"),
                 );
                 props.insert(
                     "source_type".to_string(),
-                    OwnedValue::from(s.source_type.to_bits()),
+                    OwnedVariant::from(s.source_type.to_bits()),
                 );
-                if let Some(ref mapping_id) = s.mapping_id {
-                    if let Ok(val) = OwnedValue::try_from(Value::from(mapping_id.as_str())) {
-                        props.insert("mapping_id".to_string(), val);
-                    }
+                if let Some(ref mapping_id) = s.mapping_id
+                    && let Ok(val) = OwnedVariant::try_from(Variant::from(mapping_id.as_str()))
+                {
+                    props.insert("mapping_id".to_string(), val);
                 }
                 // ScreenCast v6: the PipeWire object.serial, emitted only when
                 // present (it is filtered to a non-zero value upstream).
                 if let Some(serial) = s.serial {
-                    props.insert("pipewire-serial".to_string(), OwnedValue::from(serial));
+                    props.insert("pipewire-serial".to_string(), OwnedVariant::from(serial));
                 }
                 (s.node_id, props)
             })
@@ -164,8 +161,8 @@ impl ScreenCastInterface {
         let mut results = HashMap::new();
         results.insert(
             "streams".to_string(),
-            OwnedValue::try_from(Value::from(stream_data))
-                .expect("stream data Value converts to OwnedValue"),
+            OwnedVariant::try_from(Variant::from(stream_data))
+                .expect("stream data Variant converts to OwnedVariant"),
         );
         results
     }
@@ -183,10 +180,10 @@ impl ScreenCastInterface {
         handle: ObjectPath<'_>,
         session_handle: ObjectPath<'_>,
         app_id: &str,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
         #[zbus(header)] header: zbus::message::Header<'_>,
         #[zbus(object_server)] server: &zbus::ObjectServer,
-    ) -> zbus::fdo::Result<(u32, HashMap<String, OwnedValue>)> {
+    ) -> zbus::fdo::Result<(u32, HashMap<String, OwnedVariant>)> {
         let sender = header
             .sender()
             .ok_or_else(|| zbus::fdo::Error::Failed("Missing sender".to_string()))?
@@ -235,7 +232,7 @@ impl ScreenCastInterface {
                 let mut results = HashMap::new();
                 results.insert(
                     "session_handle".to_string(),
-                    OwnedValue::from(session_handle.to_owned()),
+                    OwnedVariant::from(session_handle.to_owned()),
                 );
                 Ok((Response::Success.to_u32(), results))
             }
@@ -257,10 +254,10 @@ impl ScreenCastInterface {
         handle: ObjectPath<'_>,
         session_handle: ObjectPath<'_>,
         app_id: &str,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
         #[zbus(header)] header: zbus::message::Header<'_>,
         #[zbus(object_server)] server: &zbus::ObjectServer,
-    ) -> zbus::fdo::Result<(u32, HashMap<String, OwnedValue>)> {
+    ) -> zbus::fdo::Result<(u32, HashMap<String, OwnedVariant>)> {
         let sender = header
             .sender()
             .ok_or_else(|| zbus::fdo::Error::Failed("Missing sender".to_string()))?
@@ -352,10 +349,10 @@ impl ScreenCastInterface {
         session_handle: ObjectPath<'_>,
         app_id: &str,
         parent_window: &str,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
         #[zbus(header)] header: zbus::message::Header<'_>,
         #[zbus(object_server)] server: &zbus::ObjectServer,
-    ) -> zbus::fdo::Result<(u32, HashMap<String, OwnedValue>)> {
+    ) -> zbus::fdo::Result<(u32, HashMap<String, OwnedVariant>)> {
         let _ = parent_window;
         let sender = header
             .sender()
@@ -413,14 +410,14 @@ impl ScreenCastInterface {
         if persist_mode != PersistMode::None {
             let output_names: Vec<String> = sources.iter().map(|s| s.name.clone()).collect();
             // Build restore_data as (suv): ("generic", 1, variant(as))
-            let names_value = Value::from(output_names);
-            let rd_tuple = Value::from(("generic", 1u32, names_value));
-            if let Ok(rd_owned) = OwnedValue::try_from(rd_tuple) {
+            let names_value = Variant::from(output_names);
+            let rd_tuple = Variant::from(("generic", 1u32, names_value));
+            if let Ok(rd_owned) = OwnedVariant::try_from(rd_tuple) {
                 results.insert("restore_data".to_string(), rd_owned);
             }
             results.insert(
                 "persist_mode".to_string(),
-                OwnedValue::from(persist_mode.to_dbus()),
+                OwnedVariant::from(persist_mode.to_dbus()),
             );
         }
 
@@ -446,8 +443,8 @@ impl ScreenCastInterface {
     async fn open_pipe_wire_remote(
         &self,
         session_handle: ObjectPath<'_>,
-        options: HashMap<String, OwnedValue>,
-    ) -> zbus::fdo::Result<zvariant::OwnedFd> {
+        options: HashMap<String, OwnedVariant>,
+    ) -> zbus::fdo::Result<OwnedFd> {
         let _ = &options;
         tracing::debug!(
             session_handle = %session_handle,
@@ -482,7 +479,7 @@ impl ScreenCastInterface {
             "PipeWire remote fd opened for client"
         );
 
-        Ok(zvariant::OwnedFd::from(fd))
+        Ok(OwnedFd::from(fd))
     }
 
     // === Properties ===

@@ -5,7 +5,7 @@ use std::{
     sync::atomic::{AtomicU32, Ordering},
 };
 
-use zbus::zvariant::ObjectPath;
+use zbus::ObjectPath;
 
 use super::state::{PersistMode, Session};
 use crate::error::{PortalError, Result};

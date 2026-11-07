@@ -76,13 +76,13 @@ impl RequestInterface {
         // If this request is associated with a session, close it
         if let Some(session_handle) = &self.session_handle {
             let mut manager = self.session_manager.lock().await;
-            if let Ok(handle) = zbus::zvariant::ObjectPath::try_from(session_handle.as_str()) {
-                if let Some(session) = manager.close_session(&handle) {
-                    tracing::info!(
-                        session_id = %session.id,
-                        "Session closed via Request.Close"
-                    );
-                }
+            if let Ok(handle) = zbus::ObjectPath::try_from(session_handle.as_str())
+                && let Some(session) = manager.close_session(&handle)
+            {
+                tracing::info!(
+                    session_id = %session.id,
+                    "Session closed via Request.Close"
+                );
             }
         }
     }

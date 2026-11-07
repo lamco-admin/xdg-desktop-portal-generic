@@ -763,10 +763,10 @@ impl ScreencopyState {
 
             // For screenshots, send error and remove
             if capture.screenshot_reply.is_some() {
-                if let Some(mut capture) = self.captures.remove(&node_id) {
-                    if let Some(reply) = capture.screenshot_reply.take() {
-                        let _ = reply.send(Err("Screencopy frame capture failed".to_string()));
-                    }
+                if let Some(mut capture) = self.captures.remove(&node_id)
+                    && let Some(reply) = capture.screenshot_reply.take()
+                {
+                    let _ = reply.send(Err("Screencopy frame capture failed".to_string()));
                 }
                 tracing::warn!(node_id, "Screenshot capture failed");
                 return;

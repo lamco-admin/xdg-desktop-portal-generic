@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-11-06
+
+### Changed
+
+- **Moves to zbus 6**, since zbus 5 is no longer maintained (RUSTSEC-2026-0370,
+  RUSTSEC-2026-0371 and RUSTSEC-2026-0372 flag its `zbus_names`, `zvariant`
+  and `zvariant_derive`). This is a breaking release because zbus types are in
+  the public API: Option maps are `HashMap<String, zbus::OwnedVariant>` (was
+  `zvariant::OwnedValue`), in `get_option_u32`, `get_option_bool`,
+  `empty_results`, `activated_options`, `deactivated_options` and the D-Bus
+  interface methods, and errors are zbus 6's. The separate `zvariant`
+  dependency is gone; zbus re-exports what's needed.
+- MSRV 1.89, which zbus 6 requires.
+
 ## [1.1.0] - 2026-10-30
 
 ### Added

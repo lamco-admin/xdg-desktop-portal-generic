@@ -12,11 +12,7 @@ use std::{
 };
 
 use tokio::sync::Mutex;
-use zbus::{
-    interface,
-    object_server::SignalEmitter,
-    zvariant::{Fd, ObjectPath, OwnedValue},
-};
+use zbus::{Fd, ObjectPath, OwnedVariant, interface, object_server::SignalEmitter};
 
 use crate::{
     error::PortalError, services::clipboard::ClipboardBackend, session::SessionManager,
@@ -108,7 +104,7 @@ impl ClipboardInterface {
     pub async fn emit_selection_owner_changed(
         signal_emitter: &SignalEmitter<'_>,
         session_handle: ObjectPath<'_>,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
     ) -> zbus::Result<()> {
         Self::selection_owner_changed(signal_emitter, session_handle, options).await
     }
@@ -130,17 +126,17 @@ impl ClipboardInterface {
     }
 
     /// Get MIME types from options.
-    fn get_mime_types(options: &HashMap<String, OwnedValue>) -> Vec<String> {
+    fn get_mime_types(options: &HashMap<String, OwnedVariant>) -> Vec<String> {
         options
             .get("mime_types")
             .and_then(|v| {
-                use zbus::zvariant::Value;
-                let value: &Value<'_> = v.downcast_ref().ok()?;
-                if let Value::Array(arr) = value {
+                use zbus::Variant;
+                let value: &Variant<'_> = v.downcast_ref().ok()?;
+                if let Variant::Array(arr) = value {
                     let strings: Vec<String> = arr
                         .iter()
                         .filter_map(|v| {
-                            if let Value::Str(s) = v {
+                            if let Variant::Str(s) = v {
                                 Some(s.to_string())
                             } else {
                                 None
@@ -167,7 +163,7 @@ impl ClipboardInterface {
     async fn request_clipboard(
         &self,
         session_handle: ObjectPath<'_>,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
     ) -> zbus::fdo::Result<()> {
         let _ = &options;
         tracing::debug!(
@@ -195,7 +191,7 @@ impl ClipboardInterface {
     async fn set_selection(
         &self,
         session_handle: ObjectPath<'_>,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
     ) -> zbus::fdo::Result<()> {
         tracing::debug!(
             session_handle = %session_handle,
@@ -370,24 +366,23 @@ impl ClipboardInterface {
         };
 
         // If write was successful and we have data, update the clipboard backend
-        if success {
-            if let (Some(entry), Some(backend)) = (&entry, &self.clipboard_backend) {
-                if let Some(ref data) = entry.data {
-                    let mut backend = backend.lock().await;
-                    // Update the backend's source data for this MIME type
-                    let clipboard = backend
-                        .get_clipboard()
-                        .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
-                    let mut new_data: HashMap<String, Vec<u8>> = HashMap::new();
-                    new_data.insert(entry.mime_type.clone(), data.clone());
-                    backend
-                        .set_clipboard(ClipboardData {
-                            mime_types: clipboard.mime_types,
-                            data: new_data,
-                        })
-                        .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
-                }
-            }
+        if success
+            && let (Some(entry), Some(backend)) = (&entry, &self.clipboard_backend)
+            && let Some(ref data) = entry.data
+        {
+            let mut backend = backend.lock().await;
+            // Update the backend's source data for this MIME type
+            let clipboard = backend
+                .get_clipboard()
+                .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+            let mut new_data: HashMap<String, Vec<u8>> = HashMap::new();
+            new_data.insert(entry.mime_type.clone(), data.clone());
+            backend
+                .set_clipboard(ClipboardData {
+                    mime_types: clipboard.mime_types,
+                    data: new_data,
+                })
+                .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
         }
 
         // Notify the clipboard backend
@@ -408,7 +403,7 @@ impl ClipboardInterface {
     async fn selection_owner_changed(
         signal_emitter: &SignalEmitter<'_>,
         session_handle: ObjectPath<'_>,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
     ) -> zbus::Result<()>;
 
     /// Signal: Selection transfer requested.
@@ -661,7 +656,7 @@ mod tests {
 
     #[test]
     fn test_get_mime_types_empty_options() {
-        let options: HashMap<String, OwnedValue> = HashMap::new();
+        let options: HashMap<String, OwnedVariant> = HashMap::new();
         assert_eq!(
             ClipboardInterface::get_mime_types(&options),
             Vec::<String>::new()
@@ -670,8 +665,8 @@ mod tests {
 
     #[test]
     fn test_get_mime_types_no_mime_types_key() {
-        let mut options: HashMap<String, OwnedValue> = HashMap::new();
-        options.insert("other_key".to_string(), OwnedValue::from(42u32));
+        let mut options: HashMap<String, OwnedVariant> = HashMap::new();
+        options.insert("other_key".to_string(), OwnedVariant::from(42u32));
         assert_eq!(
             ClipboardInterface::get_mime_types(&options),
             Vec::<String>::new()

@@ -553,12 +553,12 @@ impl Dispatch<WlOutput, Arc<Mutex<OutputInfo>>> for WaylandState {
                 } => {
                     use wayland_client::{WEnum, protocol::wl_output::Mode};
                     // Only use current mode
-                    if let WEnum::Value(f) = flags {
-                        if f.contains(Mode::Current) {
-                            info.width = width as u32;
-                            info.height = height as u32;
-                            info.refresh = refresh as u32;
-                        }
+                    if let WEnum::Value(f) = flags
+                        && f.contains(Mode::Current)
+                    {
+                        info.width = width as u32;
+                        info.height = height as u32;
+                        info.refresh = refresh as u32;
                     }
                 }
                 Event::Name { name } => {
@@ -596,11 +596,11 @@ impl Dispatch<ZxdgOutputV1, Arc<Mutex<OutputInfo>>> for WaylandState {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
-        if let zxdg_output_v1::Event::LogicalPosition { x, y } = event {
-            if let Ok(mut info) = data.lock() {
-                info.x = x;
-                info.y = y;
-            }
+        if let zxdg_output_v1::Event::LogicalPosition { x, y } = event
+            && let Ok(mut info) = data.lock()
+        {
+            info.x = x;
+            info.y = y;
         }
     }
 }

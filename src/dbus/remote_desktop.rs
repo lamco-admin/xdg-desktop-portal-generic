@@ -18,10 +18,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use tokio::sync::Mutex;
-use zbus::{
-    interface,
-    zvariant::{Fd, ObjectPath, OwnedValue, Value},
-};
+use zbus::{Fd, ObjectPath, OwnedVariant, Variant, interface};
 
 use super::{Response, empty_results, get_option_bool, get_option_u32};
 use crate::{
@@ -74,12 +71,12 @@ impl RemoteDesktopInterface {
     }
 
     /// Extract `persist_mode` from options.
-    fn get_persist_mode(options: &HashMap<String, OwnedValue>) -> PersistMode {
+    fn get_persist_mode(options: &HashMap<String, OwnedVariant>) -> PersistMode {
         get_option_u32(options, "persist_mode").map_or(PersistMode::None, PersistMode::from_dbus)
     }
 
     /// Extract device types from options.
-    fn get_device_types(options: &HashMap<String, OwnedValue>) -> DeviceTypes {
+    fn get_device_types(options: &HashMap<String, OwnedVariant>) -> DeviceTypes {
         get_option_u32(options, "types").map_or_else(DeviceTypes::all, DeviceTypes::from_bits)
     }
 
@@ -89,31 +86,31 @@ impl RemoteDesktopInterface {
     /// `a(ua{sv})` -- array of (`node_id`, properties) tuples.
     #[expect(
         clippy::expect_used,
-        reason = "Value-to-OwnedValue conversion is infallible for tuple/array types"
+        reason = "Variant-to-OwnedVariant conversion is infallible for tuple/array types"
     )]
-    fn build_stream_results(streams: &[StreamInfo]) -> HashMap<String, OwnedValue> {
-        let stream_data: Vec<(u32, HashMap<String, OwnedValue>)> = streams
+    fn build_stream_results(streams: &[StreamInfo]) -> HashMap<String, OwnedVariant> {
+        let stream_data: Vec<(u32, HashMap<String, OwnedVariant>)> = streams
             .iter()
             .map(|s| {
-                let mut props: HashMap<String, OwnedValue> = HashMap::new();
+                let mut props: HashMap<String, OwnedVariant> = HashMap::new();
                 props.insert(
                     "position".to_string(),
-                    OwnedValue::try_from(Value::from((s.position.0, s.position.1)))
-                        .expect("tuple Value converts to OwnedValue"),
+                    OwnedVariant::try_from(Variant::from((s.position.0, s.position.1)))
+                        .expect("tuple Variant converts to OwnedVariant"),
                 );
                 props.insert(
                     "size".to_string(),
-                    OwnedValue::try_from(Value::from((s.size.0, s.size.1)))
-                        .expect("tuple Value converts to OwnedValue"),
+                    OwnedVariant::try_from(Variant::from((s.size.0, s.size.1)))
+                        .expect("tuple Variant converts to OwnedVariant"),
                 );
                 props.insert(
                     "source_type".to_string(),
-                    OwnedValue::from(s.source_type.to_bits()),
+                    OwnedVariant::from(s.source_type.to_bits()),
                 );
-                if let Some(ref mapping_id) = s.mapping_id {
-                    if let Ok(val) = OwnedValue::try_from(Value::from(mapping_id.as_str())) {
-                        props.insert("mapping_id".to_string(), val);
-                    }
+                if let Some(ref mapping_id) = s.mapping_id
+                    && let Ok(val) = OwnedVariant::try_from(Variant::from(mapping_id.as_str()))
+                {
+                    props.insert("mapping_id".to_string(), val);
                 }
                 (s.node_id, props)
             })
@@ -122,8 +119,8 @@ impl RemoteDesktopInterface {
         let mut results = HashMap::new();
         results.insert(
             "streams".to_string(),
-            OwnedValue::try_from(Value::from(stream_data))
-                .expect("stream data Value converts to OwnedValue"),
+            OwnedVariant::try_from(Variant::from(stream_data))
+                .expect("stream data Variant converts to OwnedVariant"),
         );
         results
     }
@@ -146,10 +143,10 @@ impl RemoteDesktopInterface {
         handle: ObjectPath<'_>,
         session_handle: ObjectPath<'_>,
         app_id: &str,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
         #[zbus(header)] header: zbus::message::Header<'_>,
         #[zbus(object_server)] server: &zbus::ObjectServer,
-    ) -> zbus::fdo::Result<(u32, HashMap<String, OwnedValue>)> {
+    ) -> zbus::fdo::Result<(u32, HashMap<String, OwnedVariant>)> {
         let sender = header
             .sender()
             .ok_or_else(|| zbus::fdo::Error::Failed("Missing sender".to_string()))?
@@ -198,7 +195,7 @@ impl RemoteDesktopInterface {
                 let mut results = HashMap::new();
                 results.insert(
                     "session_handle".to_string(),
-                    OwnedValue::from(session_handle.to_owned()),
+                    OwnedVariant::from(session_handle.to_owned()),
                 );
                 Ok((Response::Success.to_u32(), results))
             }
@@ -224,10 +221,10 @@ impl RemoteDesktopInterface {
         handle: ObjectPath<'_>,
         session_handle: ObjectPath<'_>,
         app_id: &str,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
         #[zbus(header)] header: zbus::message::Header<'_>,
         #[zbus(object_server)] server: &zbus::ObjectServer,
-    ) -> zbus::fdo::Result<(u32, HashMap<String, OwnedValue>)> {
+    ) -> zbus::fdo::Result<(u32, HashMap<String, OwnedVariant>)> {
         let sender = header
             .sender()
             .ok_or_else(|| zbus::fdo::Error::Failed("Missing sender".to_string()))?
@@ -281,10 +278,10 @@ impl RemoteDesktopInterface {
         session_handle: ObjectPath<'_>,
         app_id: &str,
         parent_window: &str,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
         #[zbus(header)] header: zbus::message::Header<'_>,
         #[zbus(object_server)] server: &zbus::ObjectServer,
-    ) -> zbus::fdo::Result<(u32, HashMap<String, OwnedValue>)> {
+    ) -> zbus::fdo::Result<(u32, HashMap<String, OwnedVariant>)> {
         let _ = (parent_window, &options);
         let sender = header
             .sender()
@@ -352,7 +349,7 @@ impl RemoteDesktopInterface {
         }
 
         let mut results = HashMap::new();
-        results.insert("devices".to_string(), OwnedValue::from(device_bits));
+        results.insert("devices".to_string(), OwnedVariant::from(device_bits));
 
         // Include streams in response for combined RemoteDesktop+ScreenCast sessions
         if !streams.is_empty() {
@@ -364,20 +361,20 @@ impl RemoteDesktopInterface {
 
         // Include clipboard state
         if clipboard_enabled {
-            results.insert("clipboard_enabled".to_string(), OwnedValue::from(true));
+            results.insert("clipboard_enabled".to_string(), OwnedVariant::from(true));
         }
 
         // Include restore_data if persist_mode is set
         if persist_mode != PersistMode::None && !sources.is_empty() {
             let output_names: Vec<String> = sources.iter().map(|s| s.name.clone()).collect();
-            let names_value = Value::from(output_names);
-            let rd_tuple = Value::from(("generic", 1u32, names_value));
-            if let Ok(rd_owned) = OwnedValue::try_from(rd_tuple) {
+            let names_value = Variant::from(output_names);
+            let rd_tuple = Variant::from(("generic", 1u32, names_value));
+            if let Ok(rd_owned) = OwnedVariant::try_from(rd_tuple) {
                 results.insert("restore_data".to_string(), rd_owned);
             }
             results.insert(
                 "persist_mode".to_string(),
-                OwnedValue::from(persist_mode.to_dbus()),
+                OwnedVariant::from(persist_mode.to_dbus()),
             );
         }
 
@@ -406,7 +403,7 @@ impl RemoteDesktopInterface {
         &self,
         session_handle: ObjectPath<'_>,
         app_id: &str,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<Fd<'static>> {
         let _ = &options;
@@ -514,7 +511,7 @@ impl RemoteDesktopInterface {
     async fn notify_pointer_motion(
         &self,
         session_handle: ObjectPath<'_>,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
         dx: f64,
         dy: f64,
     ) -> zbus::fdo::Result<()> {
@@ -560,7 +557,7 @@ impl RemoteDesktopInterface {
     async fn notify_pointer_motion_absolute(
         &self,
         session_handle: ObjectPath<'_>,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
         stream: u32,
         x: f64,
         y: f64,
@@ -618,7 +615,7 @@ impl RemoteDesktopInterface {
     async fn notify_pointer_button(
         &self,
         session_handle: ObjectPath<'_>,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
         button: i32,
         state: u32,
     ) -> zbus::fdo::Result<()> {
@@ -664,7 +661,7 @@ impl RemoteDesktopInterface {
     async fn notify_pointer_axis(
         &self,
         session_handle: ObjectPath<'_>,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
         dx: f64,
         dy: f64,
     ) -> zbus::fdo::Result<()> {
@@ -722,7 +719,7 @@ impl RemoteDesktopInterface {
     async fn notify_pointer_axis_discrete(
         &self,
         session_handle: ObjectPath<'_>,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
         axis: u32,
         steps: i32,
     ) -> zbus::fdo::Result<()> {
@@ -772,7 +769,7 @@ impl RemoteDesktopInterface {
     async fn notify_keyboard_keycode(
         &self,
         session_handle: ObjectPath<'_>,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
         keycode: i32,
         state: u32,
     ) -> zbus::fdo::Result<()> {
@@ -823,7 +820,7 @@ impl RemoteDesktopInterface {
     async fn notify_keyboard_keysym(
         &self,
         session_handle: ObjectPath<'_>,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
         keysym: i32,
         state: u32,
     ) -> zbus::fdo::Result<()> {
@@ -881,7 +878,7 @@ impl RemoteDesktopInterface {
     async fn notify_touch_down(
         &self,
         session_handle: ObjectPath<'_>,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
         stream: u32,
         slot: u32,
         x: f64,
@@ -939,7 +936,7 @@ impl RemoteDesktopInterface {
     async fn notify_touch_motion(
         &self,
         session_handle: ObjectPath<'_>,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
         stream: u32,
         slot: u32,
         x: f64,
@@ -997,7 +994,7 @@ impl RemoteDesktopInterface {
     async fn notify_touch_up(
         &self,
         session_handle: ObjectPath<'_>,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
         slot: u32,
     ) -> zbus::fdo::Result<()> {
         let _ = &options;

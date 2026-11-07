@@ -12,11 +12,7 @@ use std::{
 };
 
 use tokio::sync::Mutex;
-use zbus::{
-    interface,
-    object_server::SignalEmitter,
-    zvariant::{ObjectPath, Value},
-};
+use zbus::{ObjectPath, Variant, interface, object_server::SignalEmitter};
 
 use crate::{
     pipewire::PipeWireManager,
@@ -114,15 +110,15 @@ impl SessionInterface {
             }
 
             // Destroy any InputCapture barrier surfaces
-            if session.is_input_capture_session {
-                if let Some(tx) = &self.input_capture_tx {
-                    let _ = tx.send(InputCaptureCommand::DestroySession { session_id });
-                }
+            if session.is_input_capture_session
+                && let Some(tx) = &self.input_capture_tx
+            {
+                let _ = tx.send(InputCaptureCommand::DestroySession { session_id });
             }
         }
 
         // Emit the Closed signal
-        let details: HashMap<&str, Value<'_>> = HashMap::new();
+        let details: HashMap<&str, Variant<'_>> = HashMap::new();
         let _ = Self::closed(&emitter, details).await;
 
         // Remove this session object from the D-Bus bus
@@ -140,7 +136,7 @@ impl SessionInterface {
     #[zbus(signal)]
     async fn closed(
         emitter: &SignalEmitter<'_>,
-        details: HashMap<&str, Value<'_>>,
+        details: HashMap<&str, Variant<'_>>,
     ) -> zbus::Result<()>;
 
     // === Properties ===

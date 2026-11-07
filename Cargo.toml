@@ -39,9 +39,9 @@ expect_used = "warn"
 
 [package]
 name = "xdg-desktop-portal-generic"
-version = "1.1.0"
+version = "2.0.0"
 edition = "2024"
-rust-version = "1.87"
+rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 description = "Generic XDG Desktop Portal backend for Wayland compositors, by Lamco Development LLC"
 repository = "https://github.com/lamco-admin/xdg-desktop-portal-generic"
@@ -73,8 +73,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dependencies]
 lamco-data-control = { version = "1.0.0", path = "crates/lamco-data-control" }
 # D-Bus service implementation
-zbus = { version = "5.2", features = ["tokio"] }
-zvariant = "5.2"
+zbus = { version = "6", features = ["tokio"] }
 
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }

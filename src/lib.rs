@@ -242,8 +242,8 @@ impl PortalBackend {
         );
         let pending_writes = clipboard_iface.pending_writes();
 
-        let connection = zbus::connection::Builder::session()?
-            .name("org.freedesktop.impl.portal.desktop.generic")?
+        let connection = zbus::connection::Builder::session()
+            .name("org.freedesktop.impl.portal.desktop.generic")
             .serve_at(
                 "/org/freedesktop/portal/desktop",
                 RemoteDesktopInterface::new(
@@ -253,7 +253,7 @@ impl PortalBackend {
                     Arc::clone(&self.pipewire_manager),
                     self.available_protocols.clone(),
                 ),
-            )?
+            )
             .serve_at(
                 "/org/freedesktop/portal/desktop",
                 ScreenCastInterface::new(
@@ -262,16 +262,16 @@ impl PortalBackend {
                     Arc::clone(&self.pipewire_manager),
                     Arc::clone(&self.input_backend),
                 ),
-            )?
-            .serve_at("/org/freedesktop/portal/desktop", clipboard_iface)?
+            )
+            .serve_at("/org/freedesktop/portal/desktop", clipboard_iface)
             .serve_at(
                 "/org/freedesktop/portal/desktop",
                 ScreenshotInterface::new(
                     Arc::clone(&self.capture_backend),
                     self.capture_tx.clone(),
                 ),
-            )?
-            .serve_at("/org/freedesktop/portal/desktop", SettingsInterface::new())?
+            )
+            .serve_at("/org/freedesktop/portal/desktop", SettingsInterface::new())
             .serve_at(
                 "/org/freedesktop/portal/desktop",
                 InputCaptureInterface::new(
@@ -283,7 +283,7 @@ impl PortalBackend {
                     self.shared_wayland_state.clone(),
                     self.input_capture_tx.clone(),
                 ),
-            )?
+            )
             .build()
             .await?;
 
@@ -461,12 +461,11 @@ impl PortalBackend {
                         }
 
                         // Destroy any InputCapture barrier surfaces
-                        if session.is_input_capture_session {
-                            if let Some(tx) = &input_capture_tx {
-                                let _ = tx.send(wayland::InputCaptureCommand::DestroySession {
-                                    session_id,
-                                });
-                            }
+                        if session.is_input_capture_session
+                            && let Some(tx) = &input_capture_tx
+                        {
+                            let _ = tx
+                                .send(wayland::InputCaptureCommand::DestroySession { session_id });
                         }
 
                         // Remove the session's own D-Bus object. `Session.Close()`
@@ -500,7 +499,7 @@ impl PortalBackend {
         pending_writes: dbus::PendingWrites,
     ) {
         use dbus::ClipboardSignal;
-        use zbus::zvariant::{OwnedValue, Value};
+        use zbus::{OwnedVariant, Variant};
 
         tracing::info!("Clipboard signal bridge started");
 
@@ -517,16 +516,18 @@ impl PortalBackend {
 
                     // Build the options map with mime_types and session_is_owner=false
                     // (the compositor owns the selection, not our portal client)
-                    let mut options: HashMap<String, OwnedValue> = HashMap::new();
+                    let mut options: HashMap<String, OwnedVariant> = HashMap::new();
 
-                    // Convert mime_types to OwnedValue (array of strings)
-                    let mime_array: Vec<Value<'_>> =
-                        mime_types.iter().map(|s| Value::from(s.as_str())).collect();
-                    if let Ok(val) = OwnedValue::try_from(Value::Array(mime_array.into())) {
+                    // Convert mime_types to OwnedVariant (array of strings)
+                    let mime_array: Vec<Variant<'_>> = mime_types
+                        .iter()
+                        .map(|s| Variant::from(s.as_str()))
+                        .collect();
+                    if let Ok(val) = OwnedVariant::try_from(Variant::Array(mime_array.into())) {
                         options.insert("mime_types".to_string(), val);
                     }
 
-                    options.insert("session_is_owner".to_string(), OwnedValue::from(false));
+                    options.insert("session_is_owner".to_string(), OwnedVariant::from(false));
 
                     // Emit signal on each clipboard-enabled session
                     let iface_ref = connection
@@ -840,7 +841,7 @@ impl PortalBackend {
         barrier_id: u32,
         cursor_position: Option<(f64, f64)>,
     ) {
-        let Ok(handle) = zbus::zvariant::ObjectPath::try_from(session_id.as_str()) else {
+        let Ok(handle) = zbus::ObjectPath::try_from(session_id.as_str()) else {
             tracing::warn!(
                 session_id = %session_id,
                 "InputCapture activation for an invalid session handle"
@@ -914,7 +915,7 @@ impl PortalBackend {
         barrier_id: u32,
         cursor_position: Option<(f64, f64)>,
     ) {
-        let Ok(handle) = zbus::zvariant::ObjectPath::try_from(session_id.as_str()) else {
+        let Ok(handle) = zbus::ObjectPath::try_from(session_id.as_str()) else {
             tracing::warn!(
                 session_id = %session_id,
                 "InputCapture deactivation for an invalid session handle"

@@ -712,10 +712,10 @@ impl WaylandConnection {
                 shared.zones = new_zones;
             }
 
-            if shared.keyboard_keymap.is_none() {
-                if let Some(keymap) = self.state.input_capture.pending_keymap.take() {
-                    shared.keyboard_keymap = Some(keymap);
-                }
+            if shared.keyboard_keymap.is_none()
+                && let Some(keymap) = self.state.input_capture.pending_keymap.take()
+            {
+                shared.keyboard_keymap = Some(keymap);
             }
 
             // Single-active-lock invariant: a locked wl_pointer stops
@@ -836,23 +836,23 @@ impl WaylandConnection {
             // then dispatch them to handlers. prepare_read() + read_events()
             // is required — dispatch_pending() alone only processes events
             // already in the buffer from previous reads.
-            if pollfd.revents & libc::POLLIN != 0 {
-                if let Some(guard) = self.event_queue.prepare_read() {
-                    match guard.read() {
-                        Ok(_) => {}
-                        // WouldBlock can occur if another thread consumed the
-                        // pending data between poll() and read(). This is benign
-                        // — wayland-client's own blocking_read() handles it the
-                        // same way (returns Ok(0) and lets the caller retry).
-                        Err(wayland_client::backend::WaylandError::Io(ref e))
-                            if e.kind() == std::io::ErrorKind::WouldBlock =>
-                        {
-                            tracing::trace!("Wayland read returned WouldBlock, retrying");
-                        }
-                        Err(e) => {
-                            tracing::error!("Wayland read_events error: {}", e);
-                            break;
-                        }
+            if pollfd.revents & libc::POLLIN != 0
+                && let Some(guard) = self.event_queue.prepare_read()
+            {
+                match guard.read() {
+                    Ok(_) => {}
+                    // WouldBlock can occur if another thread consumed the
+                    // pending data between poll() and read(). This is benign
+                    // — wayland-client's own blocking_read() handles it the
+                    // same way (returns Ok(0) and lets the caller retry).
+                    Err(wayland_client::backend::WaylandError::Io(ref e))
+                        if e.kind() == std::io::ErrorKind::WouldBlock =>
+                    {
+                        tracing::trace!("Wayland read returned WouldBlock, retrying");
+                    }
+                    Err(e) => {
+                        tracing::error!("Wayland read_events error: {}", e);
+                        break;
                     }
                 }
             }

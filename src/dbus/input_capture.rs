@@ -46,11 +46,7 @@ use std::{
 };
 
 use tokio::sync::Mutex;
-use zbus::{
-    interface,
-    object_server::SignalEmitter,
-    zvariant::{Fd, ObjectPath, OwnedValue, Value},
-};
+use zbus::{Fd, ObjectPath, OwnedVariant, Variant, interface, object_server::SignalEmitter};
 
 use super::{Response, empty_results, get_option_u32};
 use crate::{
@@ -127,7 +123,7 @@ impl InputCaptureInterface {
     pub async fn emit_activated(
         signal_emitter: &SignalEmitter<'_>,
         session_handle: ObjectPath<'_>,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
     ) -> zbus::Result<()> {
         Self::activated(signal_emitter, session_handle, options).await
     }
@@ -141,7 +137,7 @@ impl InputCaptureInterface {
     pub async fn emit_deactivated(
         signal_emitter: &SignalEmitter<'_>,
         session_handle: ObjectPath<'_>,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
     ) -> zbus::Result<()> {
         Self::deactivated(signal_emitter, session_handle, options).await
     }
@@ -170,7 +166,7 @@ impl InputCaptureInterface {
     }
 
     /// Extract `persist_mode` from options.
-    fn get_persist_mode(options: &HashMap<String, OwnedValue>) -> PersistMode {
+    fn get_persist_mode(options: &HashMap<String, OwnedVariant>) -> PersistMode {
         get_option_u32(options, "persist_mode").map_or(PersistMode::None, PersistMode::from_dbus)
     }
 
@@ -206,7 +202,7 @@ impl InputCaptureInterface {
     /// Per spec, `capabilities` is required in `Start`'s options and must
     /// not be zero.
     fn get_required_capabilities(
-        options: &HashMap<String, OwnedValue>,
+        options: &HashMap<String, OwnedVariant>,
     ) -> zbus::fdo::Result<DeviceTypes> {
         let bits = get_option_u32(options, "capabilities").ok_or_else(|| {
             PortalError::InvalidArgument("missing required option 'capabilities'".to_string())
@@ -222,17 +218,17 @@ impl InputCaptureInterface {
 
     /// Extract a `(i32, i32, i32, i32)` tuple from an options-style value.
     ///
-    /// zvariant has no direct `TryFrom<&OwnedValue>` for raw tuples, so this
-    /// downcasts to `&Value` and unpacks the `Structure` manually, the same
+    /// zvariant has no direct `TryFrom<&OwnedVariant>` for raw tuples, so this
+    /// downcasts to `&Variant` and unpacks the `Structure` manually, the same
     /// approach `ScreenCastInterface::parse_restore_data` already uses for
     /// its `(suv)` tuple.
     fn get_option_i32_tuple4(
-        options: &HashMap<String, OwnedValue>,
+        options: &HashMap<String, OwnedVariant>,
         key: &str,
     ) -> Option<(i32, i32, i32, i32)> {
         let v = options.get(key)?;
-        let value: &Value<'_> = v.downcast_ref().ok()?;
-        let Value::Structure(s) = value else {
+        let value: &Variant<'_> = v.downcast_ref().ok()?;
+        let Variant::Structure(s) = value else {
             return None;
         };
         let fields = s.fields();
@@ -303,12 +299,12 @@ impl InputCaptureInterface {
     /// Build the `a(uuii)` zones result plus `zone_set`.
     #[expect(
         clippy::expect_used,
-        reason = "Value-to-OwnedValue conversion is infallible for tuple/array types"
+        reason = "Variant-to-OwnedVariant conversion is infallible for tuple/array types"
     )]
     fn build_zones_results(
         zones: &[InputCaptureZone],
         zone_set: u32,
-    ) -> HashMap<String, OwnedValue> {
+    ) -> HashMap<String, OwnedVariant> {
         let zone_tuples: Vec<(u32, u32, i32, i32)> = zones
             .iter()
             .map(|z| (z.width, z.height, z.x, z.y))
@@ -317,10 +313,10 @@ impl InputCaptureInterface {
         let mut results = HashMap::new();
         results.insert(
             "zones".to_string(),
-            OwnedValue::try_from(Value::from(zone_tuples))
-                .expect("zone tuple array converts to OwnedValue"),
+            OwnedVariant::try_from(Variant::from(zone_tuples))
+                .expect("zone tuple array converts to OwnedVariant"),
         );
-        results.insert("zone_set".to_string(), OwnedValue::from(zone_set));
+        results.insert("zone_set".to_string(), OwnedVariant::from(zone_set));
         results
     }
 
@@ -329,7 +325,7 @@ impl InputCaptureInterface {
     /// If `submitted_zone_set` doesn't match the currently-known zone set,
     /// every barrier fails — the app's view of the geometry is stale.
     fn partition_barriers(
-        barrier_dicts: &[HashMap<String, OwnedValue>],
+        barrier_dicts: &[HashMap<String, OwnedVariant>],
         submitted_zone_set: u32,
         current_zone_set: u32,
     ) -> (Vec<PointerBarrier>, Vec<u32>) {
@@ -398,10 +394,10 @@ impl InputCaptureInterface {
         session_handle: ObjectPath<'_>,
         app_id: &str,
         parent_window: &str,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
         #[zbus(header)] header: zbus::message::Header<'_>,
         #[zbus(object_server)] server: &zbus::ObjectServer,
-    ) -> zbus::fdo::Result<(u32, HashMap<String, OwnedValue>)> {
+    ) -> zbus::fdo::Result<(u32, HashMap<String, OwnedVariant>)> {
         let _ = parent_window;
         let sender = header
             .sender()
@@ -449,7 +445,7 @@ impl InputCaptureInterface {
                 let mut results = HashMap::new();
                 results.insert(
                     "capabilities".to_string(),
-                    OwnedValue::from(negotiated.to_bits()),
+                    OwnedVariant::from(negotiated.to_bits()),
                 );
                 Ok((Response::Success.to_u32(), results))
             }
@@ -474,10 +470,10 @@ impl InputCaptureInterface {
         &self,
         session_handle: ObjectPath<'_>,
         app_id: &str,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
         #[zbus(header)] header: zbus::message::Header<'_>,
         #[zbus(object_server)] server: &zbus::ObjectServer,
-    ) -> zbus::fdo::Result<HashMap<String, OwnedValue>> {
+    ) -> zbus::fdo::Result<HashMap<String, OwnedVariant>> {
         let sender = header
             .sender()
             .ok_or_else(|| zbus::fdo::Error::Failed("Missing sender".to_string()))?
@@ -524,10 +520,10 @@ impl InputCaptureInterface {
         session_handle: ObjectPath<'_>,
         app_id: &str,
         parent_window: &str,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
         #[zbus(header)] header: zbus::message::Header<'_>,
         #[zbus(object_server)] server: &zbus::ObjectServer,
-    ) -> zbus::fdo::Result<(u32, HashMap<String, OwnedValue>)> {
+    ) -> zbus::fdo::Result<(u32, HashMap<String, OwnedVariant>)> {
         let _ = parent_window;
         let sender = header
             .sender()
@@ -573,25 +569,25 @@ impl InputCaptureInterface {
         let mut results = HashMap::new();
         results.insert(
             "capabilities".to_string(),
-            OwnedValue::from(negotiated.to_bits()),
+            OwnedVariant::from(negotiated.to_bits()),
         );
         results.insert(
             "clipboard_enabled".to_string(),
-            OwnedValue::from(clipboard_enabled),
+            OwnedVariant::from(clipboard_enabled),
         );
 
         if persist_mode != PersistMode::None {
             // No natural "selected sources" concept for InputCapture; persist
             // the negotiated capabilities bitmask as the opaque data payload,
             // matching ScreenCast's (vendor, version, data) restore_data shape.
-            let data_value = Value::from(negotiated.to_bits());
-            let rd_tuple = Value::from(("generic", 1u32, data_value));
-            if let Ok(rd_owned) = OwnedValue::try_from(rd_tuple) {
+            let data_value = Variant::from(negotiated.to_bits());
+            let rd_tuple = Variant::from(("generic", 1u32, data_value));
+            if let Ok(rd_owned) = OwnedVariant::try_from(rd_tuple) {
                 results.insert("restore_data".to_string(), rd_owned);
             }
             results.insert(
                 "persist_mode".to_string(),
-                OwnedValue::from(persist_mode.to_dbus()),
+                OwnedVariant::from(persist_mode.to_dbus()),
             );
         }
 
@@ -617,10 +613,10 @@ impl InputCaptureInterface {
         handle: ObjectPath<'_>,
         session_handle: ObjectPath<'_>,
         app_id: &str,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
         #[zbus(header)] header: zbus::message::Header<'_>,
         #[zbus(object_server)] server: &zbus::ObjectServer,
-    ) -> zbus::fdo::Result<(u32, HashMap<String, OwnedValue>)> {
+    ) -> zbus::fdo::Result<(u32, HashMap<String, OwnedVariant>)> {
         let _ = &options;
         let sender = header
             .sender()
@@ -668,12 +664,12 @@ impl InputCaptureInterface {
         handle: ObjectPath<'_>,
         session_handle: ObjectPath<'_>,
         app_id: &str,
-        options: HashMap<String, OwnedValue>,
-        barriers: Vec<HashMap<String, OwnedValue>>,
+        options: HashMap<String, OwnedVariant>,
+        barriers: Vec<HashMap<String, OwnedVariant>>,
         zone_set: u32,
         #[zbus(header)] header: zbus::message::Header<'_>,
         #[zbus(object_server)] server: &zbus::ObjectServer,
-    ) -> zbus::fdo::Result<(u32, HashMap<String, OwnedValue>)> {
+    ) -> zbus::fdo::Result<(u32, HashMap<String, OwnedVariant>)> {
         let _ = &options;
         let sender = header
             .sender()
@@ -727,9 +723,9 @@ impl InputCaptureInterface {
         &self,
         session_handle: ObjectPath<'_>,
         app_id: &str,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
         #[zbus(header)] header: zbus::message::Header<'_>,
-    ) -> zbus::fdo::Result<(u32, HashMap<String, OwnedValue>)> {
+    ) -> zbus::fdo::Result<(u32, HashMap<String, OwnedVariant>)> {
         let _ = &options;
         let sender = header
             .sender()
@@ -778,10 +774,10 @@ impl InputCaptureInterface {
         &self,
         session_handle: ObjectPath<'_>,
         app_id: &str,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
         #[zbus(header)] header: zbus::message::Header<'_>,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
-    ) -> zbus::fdo::Result<(u32, HashMap<String, OwnedValue>)> {
+    ) -> zbus::fdo::Result<(u32, HashMap<String, OwnedVariant>)> {
         let _ = &options;
         let sender = header
             .sender()
@@ -840,7 +836,7 @@ impl InputCaptureInterface {
         &self,
         session_handle: ObjectPath<'_>,
         app_id: &str,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
         #[zbus(header)] header: zbus::message::Header<'_>,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> zbus::fdo::Result<()> {
@@ -896,7 +892,7 @@ impl InputCaptureInterface {
         &self,
         session_handle: ObjectPath<'_>,
         app_id: &str,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<Fd<'static>> {
         let _ = &options;
@@ -972,7 +968,7 @@ impl InputCaptureInterface {
     async fn disabled(
         emitter: &SignalEmitter<'_>,
         session_handle: ObjectPath<'_>,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
     ) -> zbus::Result<()>;
 
     /// Emitted when input capture starts (a barrier fires).
@@ -980,7 +976,7 @@ impl InputCaptureInterface {
     async fn activated(
         emitter: &SignalEmitter<'_>,
         session_handle: ObjectPath<'_>,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
     ) -> zbus::Result<()>;
 
     /// Emitted when input capture stops.
@@ -988,7 +984,7 @@ impl InputCaptureInterface {
     async fn deactivated(
         emitter: &SignalEmitter<'_>,
         session_handle: ObjectPath<'_>,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
     ) -> zbus::Result<()>;
 
     /// Emitted when the session's zones change; the application should
@@ -997,7 +993,7 @@ impl InputCaptureInterface {
     async fn zones_changed(
         emitter: &SignalEmitter<'_>,
         session_handle: ObjectPath<'_>,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
     ) -> zbus::Result<()>;
 
     // === Properties ===
@@ -1063,13 +1059,13 @@ pub async fn emit_zones_changed(
 
 /// Insert `cursor_position` (`dd`) into an options map, if known.
 fn insert_cursor_position(
-    options: &mut HashMap<String, OwnedValue>,
+    options: &mut HashMap<String, OwnedVariant>,
     cursor_position: Option<(f64, f64)>,
 ) {
     let Some((x, y)) = cursor_position else {
         return;
     };
-    if let Ok(value) = OwnedValue::try_from(Value::from((x, y))) {
+    if let Ok(value) = OwnedVariant::try_from(Variant::from((x, y))) {
         options.insert("cursor_position".to_string(), value);
     }
 }
@@ -1079,10 +1075,13 @@ pub fn activated_options(
     activation_id: u32,
     barrier_id: u32,
     cursor_position: Option<(f64, f64)>,
-) -> HashMap<String, OwnedValue> {
+) -> HashMap<String, OwnedVariant> {
     let mut options = HashMap::new();
-    options.insert("activation_id".to_string(), OwnedValue::from(activation_id));
-    options.insert("barrier_id".to_string(), OwnedValue::from(barrier_id));
+    options.insert(
+        "activation_id".to_string(),
+        OwnedVariant::from(activation_id),
+    );
+    options.insert("barrier_id".to_string(), OwnedVariant::from(barrier_id));
     insert_cursor_position(&mut options, cursor_position);
     options
 }
@@ -1092,20 +1091,23 @@ pub fn activated_options(
 pub fn deactivated_options(
     activation_id: u32,
     cursor_position: Option<(f64, f64)>,
-) -> HashMap<String, OwnedValue> {
+) -> HashMap<String, OwnedVariant> {
     let mut options = HashMap::new();
-    options.insert("activation_id".to_string(), OwnedValue::from(activation_id));
+    options.insert(
+        "activation_id".to_string(),
+        OwnedVariant::from(activation_id),
+    );
     insert_cursor_position(&mut options, cursor_position);
     options
 }
 
-/// Convert a `Vec<u32>` to `OwnedValue` (`au`).
+/// Convert a `Vec<u32>` to `OwnedVariant` (`au`).
 #[expect(
     clippy::expect_used,
-    reason = "Value-to-OwnedValue conversion is infallible for a u32 array"
+    reason = "Variant-to-OwnedVariant conversion is infallible for a u32 array"
 )]
-fn owned_value_from_u32_array(values: Vec<u32>) -> OwnedValue {
-    OwnedValue::try_from(Value::from(values)).expect("u32 array converts to OwnedValue")
+fn owned_value_from_u32_array(values: Vec<u32>) -> OwnedVariant {
+    OwnedVariant::try_from(Variant::from(values)).expect("u32 array converts to OwnedVariant")
 }
 
 #[cfg(test)]
@@ -1132,12 +1134,12 @@ mod tests {
         ));
     }
 
-    fn barrier_dict(id: u32, pos: (i32, i32, i32, i32)) -> HashMap<String, OwnedValue> {
+    fn barrier_dict(id: u32, pos: (i32, i32, i32, i32)) -> HashMap<String, OwnedVariant> {
         let mut dict = HashMap::new();
-        dict.insert("barrier_id".to_string(), OwnedValue::from(id));
-        let position_value = Value::from(pos)
+        dict.insert("barrier_id".to_string(), OwnedVariant::from(id));
+        let position_value = Variant::from(pos)
             .try_into()
-            .expect("tuple converts to OwnedValue");
+            .expect("tuple converts to OwnedVariant");
         dict.insert("position".to_string(), position_value);
         dict
     }
@@ -1194,7 +1196,7 @@ mod tests {
     #[test]
     fn test_get_option_i32_tuple4_roundtrip() {
         let mut options = HashMap::new();
-        let value: OwnedValue = Value::from((10i32, 20i32, 30i32, 40i32))
+        let value: OwnedVariant = Variant::from((10i32, 20i32, 30i32, 40i32))
             .try_into()
             .unwrap();
         options.insert("position".to_string(), value);

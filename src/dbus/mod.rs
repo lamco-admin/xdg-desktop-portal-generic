@@ -31,7 +31,7 @@ pub use screencast::ScreenCastInterface;
 pub use screenshot::ScreenshotInterface;
 pub use session::SessionInterface;
 pub use settings::SettingsInterface;
-use zbus::zvariant::OwnedValue;
+use zbus::OwnedVariant;
 
 /// Portal response codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,7 +56,7 @@ impl Response {
 
 /// Helper to create an empty results map.
 #[must_use]
-pub fn empty_results() -> HashMap<String, OwnedValue> {
+pub fn empty_results() -> HashMap<String, OwnedVariant> {
     HashMap::new()
 }
 
@@ -64,14 +64,14 @@ pub fn empty_results() -> HashMap<String, OwnedValue> {
 #[must_use]
 #[expect(clippy::implicit_hasher, reason = "only std HashMap used")]
 #[expect(clippy::cast_sign_loss, reason = "D-Bus may encode u32 values as i32")]
-pub fn get_option_u32(options: &HashMap<String, OwnedValue>, key: &str) -> Option<u32> {
+pub fn get_option_u32(options: &HashMap<String, OwnedVariant>, key: &str) -> Option<u32> {
     options.get(key).and_then(|v| {
         // Try to get the value as u32
-        if let Ok(val) = <u32 as TryFrom<&OwnedValue>>::try_from(v) {
+        if let Ok(val) = <u32 as TryFrom<&OwnedVariant>>::try_from(v) {
             return Some(val);
         }
         // Also try i32 and convert
-        if let Ok(val) = <i32 as TryFrom<&OwnedValue>>::try_from(v) {
+        if let Ok(val) = <i32 as TryFrom<&OwnedVariant>>::try_from(v) {
             return Some(val as u32);
         }
         None
@@ -81,8 +81,8 @@ pub fn get_option_u32(options: &HashMap<String, OwnedValue>, key: &str) -> Optio
 /// Helper to extract a bool from options.
 #[must_use]
 #[expect(clippy::implicit_hasher, reason = "only std HashMap used")]
-pub fn get_option_bool(options: &HashMap<String, OwnedValue>, key: &str) -> Option<bool> {
+pub fn get_option_bool(options: &HashMap<String, OwnedVariant>, key: &str) -> Option<bool> {
     options
         .get(key)
-        .and_then(|v| <bool as TryFrom<&OwnedValue>>::try_from(v).ok())
+        .and_then(|v| <bool as TryFrom<&OwnedVariant>>::try_from(v).ok())
 }

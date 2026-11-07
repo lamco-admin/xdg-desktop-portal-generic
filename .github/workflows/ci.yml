@@ -7,7 +7,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  MSRV: "1.87"
+  MSRV: "1.89"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

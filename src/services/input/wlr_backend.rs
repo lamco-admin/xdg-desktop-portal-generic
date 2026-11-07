@@ -932,12 +932,11 @@ impl WlrInputBackend {
     /// then flush and account for the send (shared tail of
     /// [`InputBackend::inject_event`] and [`InputBackend::inject_event_batch`]).
     fn commit_and_flush(&mut self, session_id: &str, needs_pointer_frame: bool) -> Result<()> {
-        if needs_pointer_frame {
-            if let Some(ctx) = self.sessions.get(session_id) {
-                if let Some(ref pointer) = ctx.pointer {
-                    pointer.frame();
-                }
-            }
+        if needs_pointer_frame
+            && let Some(ctx) = self.sessions.get(session_id)
+            && let Some(ref pointer) = ctx.pointer
+        {
+            pointer.frame();
         }
 
         match self.flush() {
@@ -945,14 +944,14 @@ impl WlrInputBackend {
                 self.events_forwarded += 1;
 
                 // Emit periodic InputBatch health event
-                if self.events_forwarded.is_multiple_of(100) {
-                    if let Some(ref health_tx) = self.health_tx {
-                        let _ = health_tx.try_send(crate::health::PortalHealthEvent::InputBatch {
-                            events_forwarded: self.events_forwarded,
-                            events_failed: self.flush_failures,
-                            protocol: crate::health::InputProtocolType::WlrVirtual,
-                        });
-                    }
+                if self.events_forwarded.is_multiple_of(100)
+                    && let Some(ref health_tx) = self.health_tx
+                {
+                    let _ = health_tx.try_send(crate::health::PortalHealthEvent::InputBatch {
+                        events_forwarded: self.events_forwarded,
+                        events_failed: self.flush_failures,
+                        protocol: crate::health::InputProtocolType::WlrVirtual,
+                    });
                 }
 
                 Ok(())
@@ -1154,13 +1153,13 @@ impl InputBackend for WlrInputBackend {
             // to reach `sessions` and `flush()`.
             let keymap_string = self.state.xkb.as_ref()?.keymap_string.clone();
             for ctx in self.sessions.values() {
-                if let Some(ref keyboard) = ctx.keyboard {
-                    if let Err(e) = Self::set_keyboard_keymap(keyboard, &keymap_string) {
-                        tracing::warn!(
-                            error = %e,
-                            "Failed to re-upload extended keymap to a session's keyboard"
-                        );
-                    }
+                if let Some(ref keyboard) = ctx.keyboard
+                    && let Err(e) = Self::set_keyboard_keymap(keyboard, &keymap_string)
+                {
+                    tracing::warn!(
+                        error = %e,
+                        "Failed to re-upload extended keymap to a session's keyboard"
+                    );
                 }
             }
             if let Err(e) = self.flush() {

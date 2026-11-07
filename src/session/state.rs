@@ -2,7 +2,7 @@
 
 use std::time::SystemTime;
 
-use zbus::zvariant::ObjectPath;
+use zbus::ObjectPath;
 
 use crate::{
     error::{PortalError, Result},

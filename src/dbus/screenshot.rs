@@ -14,10 +14,7 @@ use std::{
 };
 
 use tokio::sync::Mutex;
-use zbus::{
-    interface,
-    zvariant::{ObjectPath, OwnedValue, Value},
-};
+use zbus::{ObjectPath, OwnedVariant, Variant, interface};
 
 use super::{Response, empty_results, get_option_bool};
 use crate::{
@@ -62,9 +59,9 @@ impl ScreenshotInterface {
         handle: ObjectPath<'_>,
         app_id: &str,
         parent_window: &str,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
         #[zbus(object_server)] server: &zbus::ObjectServer,
-    ) -> zbus::fdo::Result<(u32, HashMap<String, OwnedValue>)> {
+    ) -> zbus::fdo::Result<(u32, HashMap<String, OwnedVariant>)> {
         let _ = parent_window;
         let _interactive = get_option_bool(&options, "interactive").unwrap_or(false);
 
@@ -120,7 +117,7 @@ impl ScreenshotInterface {
         );
 
         let mut results = HashMap::new();
-        if let Ok(val) = OwnedValue::try_from(Value::from(uri.as_str())) {
+        if let Ok(val) = OwnedVariant::try_from(Variant::from(uri.as_str())) {
             results.insert("uri".to_string(), val);
         }
 
@@ -140,9 +137,9 @@ impl ScreenshotInterface {
         handle: ObjectPath<'_>,
         app_id: &str,
         parent_window: &str,
-        options: HashMap<String, OwnedValue>,
+        options: HashMap<String, OwnedVariant>,
         #[zbus(object_server)] server: &zbus::ObjectServer,
-    ) -> zbus::fdo::Result<(u32, HashMap<String, OwnedValue>)> {
+    ) -> zbus::fdo::Result<(u32, HashMap<String, OwnedVariant>)> {
         let _ = (parent_window, &options);
         tracing::debug!(app_id = app_id, "Screenshot.PickColor called");
 
@@ -193,7 +190,7 @@ impl ScreenshotInterface {
         );
 
         let mut results = HashMap::new();
-        if let Ok(color) = OwnedValue::try_from(Value::from((red, green, blue))) {
+        if let Ok(color) = OwnedVariant::try_from(Variant::from((red, green, blue))) {
             results.insert("color".to_string(), color);
         }
 

@@ -38,7 +38,7 @@ automatically with ext- protocols preferred over wlr- equivalents.
 
 Build dependencies:
 
-- Rust >= 1.87
+- Rust >= 1.89
 - `libpipewire-0.3-dev`
 - `libspa-0.2-dev`
 - `libwayland-dev`
