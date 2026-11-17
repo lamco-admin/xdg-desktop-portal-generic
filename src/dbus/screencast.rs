@@ -137,7 +137,7 @@ impl ScreenCastInterface {
                 );
                 props.insert(
                     "size".to_string(),
-                    OwnedVariant::try_from(Variant::from((s.size.0, s.size.1)))
+                    OwnedVariant::try_from(Variant::from((s.size.0 as i32, s.size.1 as i32)))
                         .expect("tuple Variant converts to OwnedVariant"),
                 );
                 props.insert(
@@ -640,6 +640,31 @@ fn run_source_picker(picker_cmd: &str, sources: &[SourceInfo]) -> Result<Vec<Sou
 mod tests {
     use super::*;
     use crate::types::SourceInfo;
+
+    #[test]
+    fn stream_dimensions_decode_as_signed_coordinates() {
+        let stream = StreamInfo {
+            node_id: 7,
+            serial: None,
+            source_id: 1,
+            position: (-1920, 0),
+            size: (1920, 1080),
+            source_type: SourceType::Monitor,
+            mapping_id: None,
+            scale: 1,
+            properties: HashMap::new(),
+        };
+        let mut results = ScreenCastInterface::build_stream_results(&[stream]);
+        let streams: Vec<(u32, HashMap<String, OwnedVariant>)> =
+            results.remove("streams").unwrap().try_into().unwrap();
+        let mut properties = streams.into_iter().next().unwrap().1;
+
+        // The frontend decodes these properties with the exact `(ii)` signature.
+        let size: (i32, i32) = properties.remove("size").unwrap().try_into().unwrap();
+        let position: (i32, i32) = properties.remove("position").unwrap().try_into().unwrap();
+        assert_eq!(size, (1920, 1080));
+        assert_eq!(position, (-1920, 0));
+    }
 
     fn test_sources() -> Vec<SourceInfo> {
         vec![
