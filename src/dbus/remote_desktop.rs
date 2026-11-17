@@ -100,7 +100,7 @@ impl RemoteDesktopInterface {
                 );
                 props.insert(
                     "size".to_string(),
-                    OwnedVariant::try_from(Variant::from((s.size.0, s.size.1)))
+                    OwnedVariant::try_from(Variant::from((s.size.0 as i32, s.size.1 as i32)))
                         .expect("tuple Variant converts to OwnedVariant"),
                 );
                 props.insert(
@@ -1080,5 +1080,36 @@ fn current_time_usec() -> u64 {
     match clock_gettime(ClockId::CLOCK_MONOTONIC) {
         Ok(ts) => ts.tv_sec() as u64 * 1_000_000 + ts.tv_nsec() as u64 / 1_000,
         Err(_) => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::SourceType;
+
+    #[test]
+    fn stream_dimensions_decode_as_signed_coordinates() {
+        let stream = StreamInfo {
+            node_id: 7,
+            serial: None,
+            source_id: 1,
+            position: (-1920, 0),
+            size: (1920, 1080),
+            source_type: SourceType::Monitor,
+            mapping_id: None,
+            scale: 1,
+            properties: HashMap::new(),
+        };
+        let mut results = RemoteDesktopInterface::build_stream_results(&[stream]);
+        let streams: Vec<(u32, HashMap<String, OwnedVariant>)> =
+            results.remove("streams").unwrap().try_into().unwrap();
+        let mut properties = streams.into_iter().next().unwrap().1;
+
+        // Combined sessions must expose the same `(ii)` geometry as ScreenCast.
+        let size: (i32, i32) = properties.remove("size").unwrap().try_into().unwrap();
+        let position: (i32, i32) = properties.remove("position").unwrap().try_into().unwrap();
+        assert_eq!(size, (1920, 1080));
+        assert_eq!(position, (-1920, 0));
     }
 }

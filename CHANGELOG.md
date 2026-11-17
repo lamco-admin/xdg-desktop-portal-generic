@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Encode ScreenCast and combined RemoteDesktop stream sizes as signed D-Bus
+  `(ii)` tuples, matching the portal specification and the frontend's geometry
+  decoding for absolute input.
+
 ## [1.2.0] - 2026-11-06
 
 ### Changed
