@@ -269,6 +269,23 @@ fn frame_damage(requested: bool, pending: &mut Vec<DamageRect>) -> Vec<DamageRec
     }
 }
 
+/// Whether a frame is asked for with `copy_with_damage()`, which the compositor
+/// answers only once the output has changed.
+///
+/// A capture's first frame and a screenshot are wanted now, damage or not. So
+/// is the first frame after the buffer changed size or format: the output was
+/// resized, and a compositor needn't count its own mode change as damage. niri
+/// doesn't, and held the first frame at the new size until something else on
+/// the screen moved (5.5 s on a still desktop, where sway answered in 50 ms).
+fn wants_damage(
+    damage_available: bool,
+    frames_delivered: u64,
+    is_screenshot: bool,
+    buffer_changed: bool,
+) -> bool {
+    damage_available && frames_delivered > 0 && !is_screenshot && !buffer_changed
+}
+
 /// Central screencopy state, stored in WaylandState.
 #[derive(Default)]
 /// Raw frame data sent through the direct frame channel.
@@ -601,11 +618,12 @@ impl ScreencopyState {
         }
         if let (Some(frame), Some(buf)) = (&capture.pending_frame, &capture.shm_buffer) {
             capture.capture_started = Some(std::time::Instant::now());
-            // A capture's first frame and a screenshot are wanted now, damage
-            // or not; after that the compositor answers once something changed.
-            let with_damage = damage_available
-                && capture.frames_delivered > 0
-                && capture.screenshot_reply.is_none();
+            let with_damage = wants_damage(
+                damage_available,
+                capture.frames_delivered,
+                capture.screenshot_reply.is_some(),
+                needs_new_buffer,
+            );
             capture.damage_requested = with_damage;
             capture.pending_damage.clear();
             if with_damage {
@@ -900,6 +918,18 @@ mod tests {
         // Should not panic
         state.stop_capture(42);
         assert!(state.captures.is_empty());
+    }
+
+    #[test]
+    fn wants_damage_except_where_a_frame_is_wanted_now() {
+        // Later frames of a running capture wait for damage.
+        assert!(wants_damage(true, 5, false, false));
+        // The first frame, a screenshot and the frame after a resize don't.
+        assert!(!wants_damage(true, 0, false, true));
+        assert!(!wants_damage(true, 5, true, false));
+        assert!(!wants_damage(true, 5, false, true));
+        // Nor does anything when damage isn't available.
+        assert!(!wants_damage(false, 5, false, false));
     }
 
     #[test]
