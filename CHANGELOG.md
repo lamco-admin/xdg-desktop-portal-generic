@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-19
+
+### Added
+
+- **`PipeWireManager::detached()`** for a consumer that takes every frame in
+  process through the direct frame channel
+  (`spawn_event_loop_with_frame_channel`). With that channel set, frames never
+  reach PipeWire, yet each capture still made a PipeWire Video/Source node that
+  nothing consumed (and other applications could see), and capture failed
+  wherever the PipeWire socket couldn't be reached, as in a Snap whose
+  `pipewire` interface isn't connected. A detached manager connects to no
+  daemon: `create_stream` hands out local stream ids with no serial,
+  `destroy_stream` and `queue_buffer` do nothing, `open_remote` fails, and
+  `is_detached()` says which kind a manager is.
+
 ## [1.2.1] - 2026-11-19
 
 ### Fixed

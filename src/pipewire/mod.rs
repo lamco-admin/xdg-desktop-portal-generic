@@ -136,7 +136,13 @@ pub struct PipeWireManager {
     running: Arc<AtomicBool>,
     /// Thread join handle.
     thread_handle: Option<thread::JoinHandle<()>>,
+    /// Set for a manager made by [`PipeWireManager::detached`]: the next stream id it hands out.
+    local_ids: Option<std::sync::atomic::AtomicU32>,
 }
+
+/// The first id a detached manager hands out, far above the ids PipeWire gives its objects, so
+/// the two are never confused in a log.
+const LOCAL_ID_BASE: u32 = 0x4000_0000;
 
 impl PipeWireManager {
     /// Start the PipeWire manager on a dedicated thread.
@@ -164,7 +170,35 @@ impl PipeWireManager {
             command_tx,
             running,
             thread_handle: Some(thread_handle),
+            local_ids: None,
         })
+    }
+
+    /// A manager that connects to no PipeWire daemon, for a consumer that takes every frame in
+    /// process through the direct frame channel
+    /// ([`crate::wayland::WaylandConnection::spawn_event_loop_with_frame_channel`]).
+    ///
+    /// With that channel set, frames never reach PipeWire, so a stream there is a Video/Source
+    /// node nothing consumes (and other applications can see), and connecting at all makes the
+    /// capture depend on a socket it doesn't use: a confined application whose PipeWire access
+    /// isn't granted couldn't capture. `create_stream` hands out local stream ids instead (with
+    /// no serial), `destroy_stream` and `queue_buffer` do nothing, and `open_remote` fails, since
+    /// there's no remote to hand a client.
+    #[must_use]
+    pub fn detached() -> Self {
+        let (command_tx, _) = mpsc::channel::<PipeWireCommand>();
+        tracing::info!("PipeWire manager detached: frames go through the direct channel only");
+        Self {
+            command_tx,
+            running: Arc::new(AtomicBool::new(false)),
+            thread_handle: None,
+            local_ids: Some(std::sync::atomic::AtomicU32::new(LOCAL_ID_BASE)),
+        }
+    }
+
+    /// Whether this manager was made by [`PipeWireManager::detached`].
+    pub fn is_detached(&self) -> bool {
+        self.local_ids.is_some()
     }
 
     /// Run the PipeWire event loop on the dedicated thread.
@@ -374,6 +408,18 @@ impl PipeWireManager {
     /// Returns the created stream's identifiers (PipeWire node ID and, when
     /// available, its `object.serial`).
     pub async fn create_stream(&self, config: StreamConfig) -> Result<StreamIds, PortalError> {
+        if let Some(ids) = &self.local_ids {
+            let node_id = ids.fetch_add(1, Ordering::Relaxed);
+            tracing::debug!(
+                node_id,
+                ?config,
+                "Detached manager: local stream id, no PipeWire node"
+            );
+            return Ok(StreamIds {
+                node_id,
+                serial: None,
+            });
+        }
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(PipeWireCommand::CreateStream {
@@ -389,6 +435,9 @@ impl PipeWireManager {
 
     /// Destroy a stream by node ID.
     pub async fn destroy_stream(&self, node_id: u32) -> Result<(), PortalError> {
+        if self.local_ids.is_some() {
+            return Ok(());
+        }
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(PipeWireCommand::DestroyStream {
@@ -424,6 +473,12 @@ impl PipeWireManager {
 
     /// Get a PipeWire remote connection fd for a client.
     pub async fn open_remote(&self) -> Result<OwnedFd, PortalError> {
+        if self.local_ids.is_some() {
+            return Err(PortalError::PipeWire(
+                "This PipeWire manager is detached: frames go through the direct channel and there's no remote"
+                    .to_string(),
+            ));
+        }
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(PipeWireCommand::OpenRemote { reply: reply_tx })
@@ -451,6 +506,34 @@ impl Drop for PipeWireManager {
         if let Some(handle) = self.thread_handle.take() {
             let _ = handle.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod detached_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn detached_manager_hands_out_local_ids_without_pipewire() {
+        let manager = PipeWireManager::detached();
+        assert!(manager.is_detached());
+        assert!(!manager.is_running());
+        let config = || StreamConfig {
+            source_id: 1,
+            width: 1280,
+            height: 800,
+            framerate: 30,
+        };
+        let first = manager.create_stream(config()).await.expect("a local id");
+        let second = manager.create_stream(config()).await.expect("a local id");
+        assert_eq!(first.node_id, LOCAL_ID_BASE);
+        assert_eq!(second.node_id, LOCAL_ID_BASE + 1);
+        assert!(first.serial.is_none());
+        manager
+            .destroy_stream(first.node_id)
+            .await
+            .expect("a no-op");
+        assert!(manager.open_remote().await.is_err());
     }
 }
 
