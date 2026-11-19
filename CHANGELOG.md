@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-11-19
+
+### Fixed
+
+- **The first frame after a resize arrives at once.** Frames after a capture's
+  first are asked for with `copy_with_damage()`, which the compositor answers
+  only once something on the output changes, and a compositor needn't count its
+  own mode change as a change. niri doesn't: after a resize it held the first
+  frame at the new size until something else moved, 5.5 s on a still desktop
+  (sway answered in 50 ms), long enough for an RDP client to give up and
+  reconnect. When the buffer changes size or format the frame is now asked for
+  with a plain `copy()`, as a capture's first frame always was.
+
 ## [1.2.0] - 2026-11-06
 
 ### Changed
