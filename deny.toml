@@ -1,24 +1,7 @@
 [advisories]
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
-ignore = [
-    # quick-xml is a BUILD-TIME dependency of wayland-scanner (a proc-macro): it
-    # parses the first-party Wayland protocol XML shipped in wayland-protocols at
-    # build time, never runtime or attacker-controlled input, and is absent from
-    # the runtime binary. Both advisories are XML-input DoS, so runtime exposure
-    # is nil. A lock fix is blocked by wayland-scanner pinning quick-xml below
-    # 0.41 (which carries the fix); revisit when wayland-rs bumps it upstream.
-    "RUSTSEC-2026-0194",
-    "RUSTSEC-2026-0195",
-    # zvariant, zbus_names and zvariant_derive are unmaintained as standalone
-    # crates: zbus 6 merged them in as its wire and names modules. Nothing is
-    # wrong with the code. This crate stays on zbus 5 because lamco-rdp-server
-    # pairs it with ashpd, whose latest release (0.13) is on zbus 5, and two
-    # zbus majors in one process share nothing. Revisit when ashpd moves.
-    "RUSTSEC-2026-0370",
-    "RUSTSEC-2026-0371",
-    "RUSTSEC-2026-0372",
-]
+ignore = []
 
 [licenses]
 allow = [
