@@ -198,7 +198,8 @@ impl ScreenCastInterface {
         );
 
         // Register Request object at handle path for cancellation support
-        let request_iface = super::RequestInterface::new(Arc::clone(&self.session_manager));
+        let request_iface =
+            super::RequestInterface::new(Arc::clone(&self.session_manager), sender.clone());
         let _ = server.at(&handle, request_iface).await;
 
         let persist_mode = Self::get_persist_mode(&options);
@@ -274,6 +275,7 @@ impl ScreenCastInterface {
         let request_iface = super::RequestInterface::for_session(
             Arc::clone(&self.session_manager),
             session_handle.to_string(),
+            sender.clone(),
         );
         let _ = server.at(&handle, request_iface).await;
 
@@ -370,6 +372,7 @@ impl ScreenCastInterface {
         let request_iface = super::RequestInterface::for_session(
             Arc::clone(&self.session_manager),
             session_handle.to_string(),
+            sender.clone(),
         );
         let _ = server.at(&handle, request_iface).await;
 
@@ -444,18 +447,20 @@ impl ScreenCastInterface {
         &self,
         session_handle: ObjectPath<'_>,
         options: HashMap<String, OwnedVariant>,
+        #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<OwnedFd> {
         let _ = &options;
+        let sender = super::caller(&header)?;
         tracing::debug!(
             session_handle = %session_handle,
+            sender = %sender,
             "OpenPipeWireRemote called"
         );
 
-        // Validate the session exists and has been started
+        // The fd is a general PipeWire client connection, so hand it only to
+        // the peer that owns a started session.
         let manager = self.session_manager.lock().await;
-        let session = manager
-            .get_session(&session_handle)
-            .ok_or_else(|| PortalError::SessionNotFound(session_handle.to_string()))?;
+        let session = manager.session_for_caller(&session_handle, &sender)?;
 
         if !session.is_started() {
             return Err(PortalError::InvalidState {

@@ -176,21 +176,50 @@ impl SessionManager {
             )));
         }
 
-        // Check D-Bus sender matches
-        if session.sender != sender {
-            tracing::warn!(
-                session_id = %session_handle,
-                expected_sender = %session.sender,
-                actual_sender = %sender,
-                "Sender mismatch"
-            );
-            return Err(PortalError::PermissionDenied(format!(
-                "Sender {} tried to access session owned by {}",
-                sender, session.sender
-            )));
-        }
+        check_sender(session, sender)
+    }
 
-        Ok(())
+    /// Look up a session on behalf of the D-Bus peer `sender`.
+    ///
+    /// Methods that carry no `app_id` (`Notify*`, `OpenPipeWireRemote`,
+    /// `Session.Close`, the clipboard methods) use this in place of
+    /// [`Self::validate_session`]. Session handles can be discovered by
+    /// introspecting the backend's object tree, so knowing one proves
+    /// nothing: only the peer that created the session may act on it.
+    ///
+    /// # Errors
+    ///
+    /// [`PortalError::SessionNotFound`] if there is no such session, and
+    /// [`PortalError::PermissionDenied`] if `sender` did not create it.
+    pub fn session_for_caller(
+        &self,
+        session_handle: &ObjectPath<'_>,
+        sender: &str,
+    ) -> Result<&Session> {
+        let session = self
+            .sessions
+            .get(session_handle.as_str())
+            .ok_or_else(|| PortalError::SessionNotFound(session_handle.to_string()))?;
+        check_sender(session, sender)?;
+        Ok(session)
+    }
+
+    /// Mutable form of [`Self::session_for_caller`].
+    ///
+    /// # Errors
+    ///
+    /// As for [`Self::session_for_caller`].
+    pub fn session_for_caller_mut(
+        &mut self,
+        session_handle: &ObjectPath<'_>,
+        sender: &str,
+    ) -> Result<&mut Session> {
+        let session = self
+            .sessions
+            .get_mut(session_handle.as_str())
+            .ok_or_else(|| PortalError::SessionNotFound(session_handle.to_string()))?;
+        check_sender(session, sender)?;
+        Ok(session)
     }
 
     /// Close and remove a session.
@@ -416,6 +445,23 @@ impl Default for SessionManager {
     }
 }
 
+/// Refuse a D-Bus peer other than the one that created `session`.
+fn check_sender(session: &Session, sender: &str) -> Result<()> {
+    if session.sender == sender {
+        return Ok(());
+    }
+    tracing::warn!(
+        session_id = %session.id,
+        expected_sender = %session.sender,
+        actual_sender = %sender,
+        "Sender mismatch"
+    );
+    Err(PortalError::PermissionDenied(format!(
+        "Sender {} tried to access session owned by {}",
+        sender, session.sender
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,6 +530,38 @@ mod tests {
                 .validate_session(&fake_handle, "com.example.app", ":1.123")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn test_session_for_caller_refuses_other_senders() {
+        let mut manager = SessionManager::new();
+        let handle = SessionManager::generate_session_handle();
+        manager
+            .create_session(
+                handle.clone(),
+                ":1.123".to_string(),
+                "com.example.app".to_string(),
+                PersistMode::None,
+            )
+            .unwrap();
+
+        assert!(manager.session_for_caller(&handle, ":1.123").is_ok());
+        assert!(manager.session_for_caller_mut(&handle, ":1.123").is_ok());
+
+        assert!(matches!(
+            manager.session_for_caller(&handle, ":1.456"),
+            Err(PortalError::PermissionDenied(_))
+        ));
+        assert!(matches!(
+            manager.session_for_caller_mut(&handle, ":1.456"),
+            Err(PortalError::PermissionDenied(_))
+        ));
+
+        let unknown = SessionManager::generate_session_handle();
+        assert!(matches!(
+            manager.session_for_caller(&unknown, ":1.123"),
+            Err(PortalError::SessionNotFound(_))
+        ));
     }
 
     #[test]

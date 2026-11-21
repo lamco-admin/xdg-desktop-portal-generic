@@ -8,6 +8,8 @@
 //! - `org.freedesktop.impl.portal.Screenshot`
 //! - `org.freedesktop.impl.portal.InputCapture`
 
+#[cfg(test)]
+mod bus_tests;
 mod clipboard;
 mod input_capture;
 mod remote_desktop;
@@ -52,6 +54,19 @@ impl Response {
     pub fn to_u32(self) -> u32 {
         self as u32
     }
+}
+
+/// The unique bus name of the peer that sent a method call.
+///
+/// # Errors
+///
+/// Fails if the message carries no sender, which a message routed by a bus
+/// daemon always does.
+pub(crate) fn caller(header: &zbus::message::Header<'_>) -> zbus::fdo::Result<String> {
+    header
+        .sender()
+        .map(ToString::to_string)
+        .ok_or_else(|| zbus::fdo::Error::Failed("Missing sender".to_string()))
 }
 
 /// Helper to create an empty results map.

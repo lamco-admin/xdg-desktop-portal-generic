@@ -75,15 +75,24 @@ impl SessionInterface {
     /// object is removed from the bus after this call.
     async fn close(
         &self,
+        #[zbus(header)] header: zbus::message::Header<'_>,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
         #[zbus(object_server)] server: &zbus::ObjectServer,
     ) -> zbus::fdo::Result<()> {
+        let sender = super::caller(&header)?;
         tracing::debug!(
             session_handle = %self.session_handle,
+            sender = %sender,
             "Session.Close called"
         );
 
         let mut manager = self.session_manager.lock().await;
+        // Only the peer that created the session may close it. A session
+        // already gone from the manager has nothing left to protect, so the
+        // stale object below is removed whoever asks.
+        if manager.get_session(&self.session_handle).is_some() {
+            manager.session_for_caller(&self.session_handle, &sender)?;
+        }
         let closed = manager.close_session(&self.session_handle);
         drop(manager);
 

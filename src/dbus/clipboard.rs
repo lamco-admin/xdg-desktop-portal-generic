@@ -164,6 +164,7 @@ impl ClipboardInterface {
         &self,
         session_handle: ObjectPath<'_>,
         options: HashMap<String, OwnedVariant>,
+        #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<()> {
         let _ = &options;
         tracing::debug!(
@@ -171,10 +172,9 @@ impl ClipboardInterface {
             "RequestClipboard called"
         );
 
+        let sender = super::caller(&header)?;
         let mut manager = self.session_manager.lock().await;
-        let session = manager
-            .get_session_mut(&session_handle)
-            .ok_or_else(|| PortalError::SessionNotFound(session_handle.to_string()))?;
+        let session = manager.session_for_caller_mut(&session_handle, &sender)?;
 
         session.request_clipboard()?;
 
@@ -192,6 +192,7 @@ impl ClipboardInterface {
         &self,
         session_handle: ObjectPath<'_>,
         options: HashMap<String, OwnedVariant>,
+        #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<()> {
         tracing::debug!(
             session_handle = %session_handle,
@@ -204,10 +205,9 @@ impl ClipboardInterface {
             tracing::warn!("SetSelection called with no MIME types");
         }
 
+        let sender = super::caller(&header)?;
         let manager = self.session_manager.lock().await;
-        let session = manager
-            .get_session(&session_handle)
-            .ok_or_else(|| PortalError::SessionNotFound(session_handle.to_string()))?;
+        let session = manager.session_for_caller(&session_handle, &sender)?;
 
         if !session.clipboard_enabled {
             return Err(PortalError::ClipboardNotEnabled.into());
@@ -241,6 +241,7 @@ impl ClipboardInterface {
         &self,
         session_handle: ObjectPath<'_>,
         serial: u32,
+        #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<Fd<'static>> {
         tracing::debug!(
             session_handle = %session_handle,
@@ -248,10 +249,9 @@ impl ClipboardInterface {
             "SelectionWrite called"
         );
 
+        let sender = super::caller(&header)?;
         let manager = self.session_manager.lock().await;
-        let session = manager
-            .get_session(&session_handle)
-            .ok_or_else(|| PortalError::SessionNotFound(session_handle.to_string()))?;
+        let session = manager.session_for_caller(&session_handle, &sender)?;
 
         if !session.clipboard_enabled {
             return Err(PortalError::ClipboardNotEnabled.into());
@@ -281,6 +281,7 @@ impl ClipboardInterface {
         &self,
         session_handle: ObjectPath<'_>,
         mime_type: &str,
+        #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<Fd<'static>> {
         tracing::debug!(
             session_handle = %session_handle,
@@ -288,10 +289,9 @@ impl ClipboardInterface {
             "SelectionRead called"
         );
 
+        let sender = super::caller(&header)?;
         let manager = self.session_manager.lock().await;
-        let session = manager
-            .get_session(&session_handle)
-            .ok_or_else(|| PortalError::SessionNotFound(session_handle.to_string()))?;
+        let session = manager.session_for_caller(&session_handle, &sender)?;
 
         if !session.clipboard_enabled {
             return Err(PortalError::ClipboardNotEnabled.into());
@@ -339,6 +339,7 @@ impl ClipboardInterface {
         session_handle: ObjectPath<'_>,
         serial: u32,
         success: bool,
+        #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<()> {
         tracing::debug!(
             session_handle = %session_handle,
@@ -347,10 +348,9 @@ impl ClipboardInterface {
             "SelectionWriteDone called"
         );
 
+        let sender = super::caller(&header)?;
         let manager = self.session_manager.lock().await;
-        let session = manager
-            .get_session(&session_handle)
-            .ok_or_else(|| PortalError::SessionNotFound(session_handle.to_string()))?;
+        let session = manager.session_for_caller(&session_handle, &sender)?;
 
         if !session.clipboard_enabled {
             return Err(PortalError::ClipboardNotEnabled.into());

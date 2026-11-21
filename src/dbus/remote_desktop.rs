@@ -36,6 +36,32 @@ use crate::{
     wayland::AvailableProtocols,
 };
 
+/// The device type a `Notify*` method injects for.
+#[derive(Debug, Clone, Copy)]
+enum InputDevice {
+    Pointer,
+    Keyboard,
+    Touchscreen,
+}
+
+impl InputDevice {
+    fn enabled_in(self, devices: DeviceTypes) -> bool {
+        match self {
+            Self::Pointer => devices.pointer,
+            Self::Keyboard => devices.keyboard,
+            Self::Touchscreen => devices.touchscreen,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Pointer => "Pointer",
+            Self::Keyboard => "Keyboard",
+            Self::Touchscreen => "Touchscreen",
+        }
+    }
+}
+
 /// `RemoteDesktop` portal interface implementation.
 pub struct RemoteDesktopInterface {
     /// Session manager.
@@ -78,6 +104,39 @@ impl RemoteDesktopInterface {
     /// Extract device types from options.
     fn get_device_types(options: &HashMap<String, OwnedVariant>) -> DeviceTypes {
         get_option_u32(options, "types").map_or_else(DeviceTypes::all, DeviceTypes::from_bits)
+    }
+
+    /// Authorize a `Notify*` call and return the id the input backend knows
+    /// the session by.
+    ///
+    /// Refuses a caller other than the peer that created the session, a
+    /// session that hasn't been started (input before `Start` would skip the
+    /// consent the frontend asks for there), and a device type the session
+    /// didn't select.
+    async fn authorize_input(
+        &self,
+        session_handle: &ObjectPath<'_>,
+        header: &zbus::message::Header<'_>,
+        device: InputDevice,
+    ) -> zbus::fdo::Result<String> {
+        let sender = super::caller(header)?;
+        let manager = self.session_manager.lock().await;
+        let session = manager.session_for_caller(session_handle, &sender)?;
+
+        if !session.is_started() {
+            return Err(PortalError::InvalidState {
+                expected: "Started".to_string(),
+                actual: session.state.to_string(),
+            }
+            .into());
+        }
+        if !device.enabled_in(session.device_types) {
+            return Err(
+                PortalError::PermissionDenied(format!("{} not enabled", device.name())).into(),
+            );
+        }
+
+        Ok(session_handle.to_string())
     }
 
     /// Build stream results for D-Bus response (combined `RemoteDesktop`+`ScreenCast`).
@@ -161,7 +220,8 @@ impl RemoteDesktopInterface {
         );
 
         // Register Request object at handle path for cancellation support
-        let request_iface = super::RequestInterface::new(Arc::clone(&self.session_manager));
+        let request_iface =
+            super::RequestInterface::new(Arc::clone(&self.session_manager), sender.clone());
         let _ = server.at(&handle, request_iface).await;
 
         let persist_mode = Self::get_persist_mode(&options);
@@ -241,6 +301,7 @@ impl RemoteDesktopInterface {
         let request_iface = super::RequestInterface::for_session(
             Arc::clone(&self.session_manager),
             session_handle.to_string(),
+            sender.clone(),
         );
         let _ = server.at(&handle, request_iface).await;
 
@@ -299,6 +360,7 @@ impl RemoteDesktopInterface {
         let request_iface = super::RequestInterface::for_session(
             Arc::clone(&self.session_manager),
             session_handle.to_string(),
+            sender.clone(),
         );
         let _ = server.at(&handle, request_iface).await;
 
@@ -514,6 +576,7 @@ impl RemoteDesktopInterface {
         options: HashMap<String, OwnedVariant>,
         dx: f64,
         dy: f64,
+        #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<()> {
         let _ = &options;
         tracing::trace!(
@@ -523,17 +586,9 @@ impl RemoteDesktopInterface {
             "NotifyPointerMotion"
         );
 
-        let manager = self.session_manager.lock().await;
-        let session = manager
-            .get_session(&session_handle)
-            .ok_or_else(|| PortalError::SessionNotFound(session_handle.to_string()))?;
-
-        if !session.device_types.pointer {
-            return Err(PortalError::PermissionDenied("Pointer not enabled".to_string()).into());
-        }
-
-        let session_id = session_handle.to_string();
-        drop(manager);
+        let session_id = self
+            .authorize_input(&session_handle, &header, InputDevice::Pointer)
+            .await?;
 
         let mut backend = self.input_backend.lock().await;
         backend.inject_event(
@@ -561,6 +616,7 @@ impl RemoteDesktopInterface {
         stream: u32,
         x: f64,
         y: f64,
+        #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<()> {
         let _ = &options;
         tracing::trace!(
@@ -571,17 +627,9 @@ impl RemoteDesktopInterface {
             "NotifyPointerMotionAbsolute"
         );
 
-        let manager = self.session_manager.lock().await;
-        let session = manager
-            .get_session(&session_handle)
-            .ok_or_else(|| PortalError::SessionNotFound(session_handle.to_string()))?;
-
-        if !session.device_types.pointer {
-            return Err(PortalError::PermissionDenied("Pointer not enabled".to_string()).into());
-        }
-
-        let session_id = session_handle.to_string();
-        drop(manager);
+        let session_id = self
+            .authorize_input(&session_handle, &header, InputDevice::Pointer)
+            .await?;
 
         let mut backend = self.input_backend.lock().await;
         backend.inject_event(
@@ -618,6 +666,7 @@ impl RemoteDesktopInterface {
         options: HashMap<String, OwnedVariant>,
         button: i32,
         state: u32,
+        #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<()> {
         let _ = &options;
         tracing::trace!(
@@ -627,17 +676,9 @@ impl RemoteDesktopInterface {
             "NotifyPointerButton"
         );
 
-        let manager = self.session_manager.lock().await;
-        let session = manager
-            .get_session(&session_handle)
-            .ok_or_else(|| PortalError::SessionNotFound(session_handle.to_string()))?;
-
-        if !session.device_types.pointer {
-            return Err(PortalError::PermissionDenied("Pointer not enabled".to_string()).into());
-        }
-
-        let session_id = session_handle.to_string();
-        drop(manager);
+        let session_id = self
+            .authorize_input(&session_handle, &header, InputDevice::Pointer)
+            .await?;
 
         let mut backend = self.input_backend.lock().await;
         backend.inject_event(
@@ -664,6 +705,7 @@ impl RemoteDesktopInterface {
         options: HashMap<String, OwnedVariant>,
         dx: f64,
         dy: f64,
+        #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<()> {
         let finish = get_option_bool(&options, "finish").unwrap_or(false);
 
@@ -675,17 +717,9 @@ impl RemoteDesktopInterface {
             "NotifyPointerAxis"
         );
 
-        let manager = self.session_manager.lock().await;
-        let session = manager
-            .get_session(&session_handle)
-            .ok_or_else(|| PortalError::SessionNotFound(session_handle.to_string()))?;
-
-        if !session.device_types.pointer {
-            return Err(PortalError::PermissionDenied("Pointer not enabled".to_string()).into());
-        }
-
-        let session_id = session_handle.to_string();
-        drop(manager);
+        let session_id = self
+            .authorize_input(&session_handle, &header, InputDevice::Pointer)
+            .await?;
 
         let mut backend = self.input_backend.lock().await;
         backend.inject_event(
@@ -722,6 +756,7 @@ impl RemoteDesktopInterface {
         options: HashMap<String, OwnedVariant>,
         axis: u32,
         steps: i32,
+        #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<()> {
         let _ = &options;
         tracing::trace!(
@@ -731,17 +766,9 @@ impl RemoteDesktopInterface {
             "NotifyPointerAxisDiscrete"
         );
 
-        let manager = self.session_manager.lock().await;
-        let session = manager
-            .get_session(&session_handle)
-            .ok_or_else(|| PortalError::SessionNotFound(session_handle.to_string()))?;
-
-        if !session.device_types.pointer {
-            return Err(PortalError::PermissionDenied("Pointer not enabled".to_string()).into());
-        }
-
-        let session_id = session_handle.to_string();
-        drop(manager);
+        let session_id = self
+            .authorize_input(&session_handle, &header, InputDevice::Pointer)
+            .await?;
 
         let mut backend = self.input_backend.lock().await;
         backend.inject_event(
@@ -772,6 +799,7 @@ impl RemoteDesktopInterface {
         options: HashMap<String, OwnedVariant>,
         keycode: i32,
         state: u32,
+        #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<()> {
         let _ = &options;
         tracing::trace!(
@@ -781,17 +809,9 @@ impl RemoteDesktopInterface {
             "NotifyKeyboardKeycode"
         );
 
-        let manager = self.session_manager.lock().await;
-        let session = manager
-            .get_session(&session_handle)
-            .ok_or_else(|| PortalError::SessionNotFound(session_handle.to_string()))?;
-
-        if !session.device_types.keyboard {
-            return Err(PortalError::PermissionDenied("Keyboard not enabled".to_string()).into());
-        }
-
-        let session_id = session_handle.to_string();
-        drop(manager);
+        let session_id = self
+            .authorize_input(&session_handle, &header, InputDevice::Keyboard)
+            .await?;
 
         let mut backend = self.input_backend.lock().await;
         backend.inject_event(
@@ -823,6 +843,7 @@ impl RemoteDesktopInterface {
         options: HashMap<String, OwnedVariant>,
         keysym: i32,
         state: u32,
+        #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<()> {
         let _ = &options;
         tracing::trace!(
@@ -832,17 +853,9 @@ impl RemoteDesktopInterface {
             "NotifyKeyboardKeysym"
         );
 
-        let manager = self.session_manager.lock().await;
-        let session = manager
-            .get_session(&session_handle)
-            .ok_or_else(|| PortalError::SessionNotFound(session_handle.to_string()))?;
-
-        if !session.device_types.keyboard {
-            return Err(PortalError::PermissionDenied("Keyboard not enabled".to_string()).into());
-        }
-
-        let session_id = session_handle.to_string();
-        drop(manager);
+        let session_id = self
+            .authorize_input(&session_handle, &header, InputDevice::Keyboard)
+            .await?;
 
         let mut backend = self.input_backend.lock().await;
 
@@ -874,6 +887,10 @@ impl RemoteDesktopInterface {
         clippy::cast_possible_wrap,
         reason = "D-Bus sends slot as u32 but touch id is i32; slot values are small"
     )]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "D-Bus method signature requires all parameters"
+    )]
     #[zbus(name = "NotifyTouchDown")]
     async fn notify_touch_down(
         &self,
@@ -883,6 +900,7 @@ impl RemoteDesktopInterface {
         slot: u32,
         x: f64,
         y: f64,
+        #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<()> {
         let _ = &options;
         tracing::trace!(
@@ -894,19 +912,9 @@ impl RemoteDesktopInterface {
             "NotifyTouchDown"
         );
 
-        let manager = self.session_manager.lock().await;
-        let session = manager
-            .get_session(&session_handle)
-            .ok_or_else(|| PortalError::SessionNotFound(session_handle.to_string()))?;
-
-        if !session.device_types.touchscreen {
-            return Err(
-                PortalError::PermissionDenied("Touchscreen not enabled".to_string()).into(),
-            );
-        }
-
-        let session_id = session_handle.to_string();
-        drop(manager);
+        let session_id = self
+            .authorize_input(&session_handle, &header, InputDevice::Touchscreen)
+            .await?;
 
         let mut backend = self.input_backend.lock().await;
         backend.inject_event(
@@ -932,6 +940,10 @@ impl RemoteDesktopInterface {
         clippy::cast_possible_wrap,
         reason = "D-Bus sends slot as u32 but touch id is i32; slot values are small"
     )]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "D-Bus method signature requires all parameters"
+    )]
     #[zbus(name = "NotifyTouchMotion")]
     async fn notify_touch_motion(
         &self,
@@ -941,6 +953,7 @@ impl RemoteDesktopInterface {
         slot: u32,
         x: f64,
         y: f64,
+        #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<()> {
         let _ = &options;
         tracing::trace!(
@@ -952,19 +965,9 @@ impl RemoteDesktopInterface {
             "NotifyTouchMotion"
         );
 
-        let manager = self.session_manager.lock().await;
-        let session = manager
-            .get_session(&session_handle)
-            .ok_or_else(|| PortalError::SessionNotFound(session_handle.to_string()))?;
-
-        if !session.device_types.touchscreen {
-            return Err(
-                PortalError::PermissionDenied("Touchscreen not enabled".to_string()).into(),
-            );
-        }
-
-        let session_id = session_handle.to_string();
-        drop(manager);
+        let session_id = self
+            .authorize_input(&session_handle, &header, InputDevice::Touchscreen)
+            .await?;
 
         let mut backend = self.input_backend.lock().await;
         backend.inject_event(
@@ -996,6 +999,7 @@ impl RemoteDesktopInterface {
         session_handle: ObjectPath<'_>,
         options: HashMap<String, OwnedVariant>,
         slot: u32,
+        #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<()> {
         let _ = &options;
         tracing::trace!(
@@ -1004,19 +1008,9 @@ impl RemoteDesktopInterface {
             "NotifyTouchUp"
         );
 
-        let manager = self.session_manager.lock().await;
-        let session = manager
-            .get_session(&session_handle)
-            .ok_or_else(|| PortalError::SessionNotFound(session_handle.to_string()))?;
-
-        if !session.device_types.touchscreen {
-            return Err(
-                PortalError::PermissionDenied("Touchscreen not enabled".to_string()).into(),
-            );
-        }
-
-        let session_id = session_handle.to_string();
-        drop(manager);
+        let session_id = self
+            .authorize_input(&session_handle, &header, InputDevice::Touchscreen)
+            .await?;
 
         let mut backend = self.input_backend.lock().await;
         backend.inject_event(

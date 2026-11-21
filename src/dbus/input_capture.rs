@@ -419,7 +419,8 @@ impl InputCaptureInterface {
             return Ok((Response::Other.to_u32(), empty_results()));
         }
 
-        let request_iface = super::RequestInterface::new(Arc::clone(&self.session_manager));
+        let request_iface =
+            super::RequestInterface::new(Arc::clone(&self.session_manager), sender.clone());
         let _ = server.at(&handle, request_iface).await;
 
         let persist_mode = Self::get_persist_mode(&options);
@@ -548,6 +549,7 @@ impl InputCaptureInterface {
         let request_iface = super::RequestInterface::for_session(
             Arc::clone(&self.session_manager),
             session_handle.to_string(),
+            sender.clone(),
         );
         let _ = server.at(&handle, request_iface).await;
 
@@ -626,6 +628,7 @@ impl InputCaptureInterface {
         let request_iface = super::RequestInterface::for_session(
             Arc::clone(&self.session_manager),
             session_handle.to_string(),
+            sender.clone(),
         );
         let _ = server.at(&handle, request_iface).await;
 
@@ -679,6 +682,7 @@ impl InputCaptureInterface {
         let request_iface = super::RequestInterface::for_session(
             Arc::clone(&self.session_manager),
             session_handle.to_string(),
+            sender.clone(),
         );
         let _ = server.at(&handle, request_iface).await;
 
