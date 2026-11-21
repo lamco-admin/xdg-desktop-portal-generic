@@ -3,6 +3,7 @@
 use std::{
     collections::HashMap,
     sync::atomic::{AtomicU32, Ordering},
+    time::{Duration, SystemTime},
 };
 
 use zbus::ObjectPath;
@@ -12,6 +13,32 @@ use crate::error::{PortalError, Result};
 
 /// Default maximum sessions per application.
 const DEFAULT_MAX_SESSIONS_PER_APP: usize = 10;
+
+/// How long a restore grant issued for `persist_mode` 1 (transient) lasts.
+///
+/// The frontend keeps transient restore data only while the application
+/// runs, so this only bounds a grant nobody comes back for.
+pub const TRANSIENT_RESTORE_GRANT_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// How long a restore grant issued for `persist_mode` 2 (persistent) lasts.
+///
+/// Grants live in memory only, so a persistent grant also ends when the
+/// backend exits. The user is then asked again, which is the safe way to
+/// fail.
+pub const PERSISTENT_RESTORE_GRANT_LIFETIME: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// Most restore grants held at once; issuing past it drops the grant that
+/// would expire soonest.
+const MAX_RESTORE_GRANTS: usize = 256;
+
+/// A source selection the user made, which an application may restore once
+/// by presenting the grant's token.
+#[derive(Debug, Clone)]
+struct RestoreGrant {
+    app_id: String,
+    output_names: Vec<String>,
+    expires_at: SystemTime,
+}
 
 /// Counter for generating unique session IDs.
 static SESSION_COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -46,6 +73,8 @@ pub struct SessionManager {
     /// Handle of the session whose `SetSelection` is current, if any. Only
     /// that session is asked for the selection's data.
     selection_owner: Option<String>,
+    /// Restore grants this backend issued, keyed by token.
+    restore_grants: HashMap<String, RestoreGrant>,
     /// Configuration.
     config: SessionManagerConfig,
 }
@@ -62,6 +91,7 @@ impl SessionManager {
             sessions: HashMap::new(),
             app_session_count: HashMap::new(),
             selection_owner: None,
+            restore_grants: HashMap::new(),
             config,
         }
     }
@@ -370,6 +400,76 @@ impl SessionManager {
             .then(|| session.id.clone())
     }
 
+    /// Record a source selection `app_id` may restore later, and return the
+    /// token to hand back as its restore data.
+    ///
+    /// Returns `None` for [`PersistMode::None`]. The selection is held here,
+    /// in memory; the token alone means nothing outside this process.
+    pub fn issue_restore_grant(
+        &mut self,
+        app_id: &str,
+        output_names: Vec<String>,
+        persist_mode: PersistMode,
+    ) -> Option<String> {
+        let lifetime = match persist_mode {
+            PersistMode::None => return None,
+            PersistMode::Transient => TRANSIENT_RESTORE_GRANT_LIFETIME,
+            PersistMode::Persistent => PERSISTENT_RESTORE_GRANT_LIFETIME,
+        };
+        let now = SystemTime::now();
+        self.restore_grants
+            .retain(|_, grant| grant.expires_at > now);
+        if self.restore_grants.len() >= MAX_RESTORE_GRANTS
+            && let Some(soonest) = self
+                .restore_grants
+                .iter()
+                .min_by_key(|(_, grant)| grant.expires_at)
+                .map(|(token, _)| token.clone())
+        {
+            self.restore_grants.remove(&soonest);
+        }
+
+        let token = uuid::Uuid::new_v4().simple().to_string();
+        self.restore_grants.insert(
+            token.clone(),
+            RestoreGrant {
+                app_id: app_id.to_string(),
+                output_names,
+                expires_at: now + lifetime,
+            },
+        );
+        Some(token)
+    }
+
+    /// Redeem a restore grant for `app_id`, returning the output names the
+    /// user selected when it was issued.
+    ///
+    /// A grant is used up by redeeming it: the `Start` that follows issues a
+    /// fresh one if the session persists again. A token issued to another
+    /// application, unknown, or expired restores nothing.
+    pub fn redeem_restore_grant(&mut self, app_id: &str, token: &str) -> Option<Vec<String>> {
+        self.redeem_restore_grant_at(app_id, token, SystemTime::now())
+    }
+
+    fn redeem_restore_grant_at(
+        &mut self,
+        app_id: &str,
+        token: &str,
+        now: SystemTime,
+    ) -> Option<Vec<String>> {
+        let grant = self.restore_grants.get(token)?;
+        if grant.app_id != app_id {
+            tracing::warn!(
+                expected_app = %grant.app_id,
+                actual_app = %app_id,
+                "Restore grant presented by another app"
+            );
+            return None;
+        }
+        let grant = self.restore_grants.remove(token)?;
+        (grant.expires_at > now).then_some(grant.output_names)
+    }
+
     /// Get session handles for all non-closed InputCapture sessions.
     ///
     /// Used to fan out `ZonesChanged` when monitor geometry changes.
@@ -550,6 +650,46 @@ mod tests {
             manager.session_for_caller(&unknown, ":1.123"),
             Err(PortalError::SessionNotFound(_))
         ));
+    }
+
+    #[test]
+    fn test_restore_grant_round_trip() {
+        let mut manager = SessionManager::new();
+        let outputs = vec!["HDMI-A-1".to_string()];
+
+        assert_eq!(
+            manager.issue_restore_grant("app", outputs.clone(), PersistMode::None),
+            None
+        );
+
+        let token = manager
+            .issue_restore_grant("app", outputs.clone(), PersistMode::Persistent)
+            .unwrap();
+        // Another app can't use it, and trying doesn't use it up.
+        assert_eq!(manager.redeem_restore_grant("other.app", &token), None);
+        assert_eq!(manager.redeem_restore_grant("app", "forged"), None);
+        assert_eq!(manager.redeem_restore_grant("app", &token), Some(outputs));
+        // Single use.
+        assert_eq!(manager.redeem_restore_grant("app", &token), None);
+    }
+
+    #[test]
+    fn test_restore_grant_expires() {
+        let mut manager = SessionManager::new();
+        let token = manager
+            .issue_restore_grant("app", vec!["eDP-1".to_string()], PersistMode::Transient)
+            .unwrap();
+        let later = SystemTime::now() + TRANSIENT_RESTORE_GRANT_LIFETIME + Duration::from_secs(1);
+        assert_eq!(manager.redeem_restore_grant_at("app", &token, later), None);
+    }
+
+    #[test]
+    fn test_restore_grants_are_bounded() {
+        let mut manager = SessionManager::new();
+        for _ in 0..MAX_RESTORE_GRANTS + 10 {
+            manager.issue_restore_grant("app", Vec::new(), PersistMode::Transient);
+        }
+        assert_eq!(manager.restore_grants.len(), MAX_RESTORE_GRANTS);
     }
 
     #[test]

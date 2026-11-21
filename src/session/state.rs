@@ -11,17 +11,21 @@ use crate::{
 
 /// Restore data for persistent sessions.
 ///
-/// Stored by ScreenCast/RemoteDesktop when `persist_mode != None`, and passed
-/// back on subsequent `SelectSources` calls to restore the previous selection.
-/// Serialized on D-Bus as `(suv)`: (vendor, version, data).
+/// Returned by ScreenCast/RemoteDesktop `Start` when `persist_mode != None`,
+/// and passed back on a later `SelectSources` to skip the source picker.
+/// Serialized on D-Bus as `(suv)`: (vendor, version, data), with vendor
+/// `"generic"`, version 2 and the data a string token naming a restore
+/// grant the backend holds (see [`crate::session::SessionManager::issue_restore_grant`]).
+/// The selection itself stays in the backend, so restore data can't be
+/// forged from output names.
 #[derive(Debug, Clone)]
 pub struct RestoreData {
     /// Vendor identifier (always `"generic"` for this backend).
     pub vendor: String,
     /// Data format version.
     pub version: u32,
-    /// Previously selected output names.
-    pub output_names: Vec<String>,
+    /// Token of the restore grant this backend issued.
+    pub token: String,
 }
 
 /// Session persistence mode.
@@ -147,7 +151,7 @@ pub struct Session {
     pub persist_mode: PersistMode,
     /// Restore token for persistent sessions.
     pub restore_token: Option<String>,
-    /// Restore data from a previous session: output names that were previously selected.
+    /// Restore data the caller passed to `SelectSources`, if any.
     pub restore_data: Option<RestoreData>,
 
     // Metadata

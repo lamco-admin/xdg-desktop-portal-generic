@@ -37,6 +37,8 @@
 //! - `XDP_GENERIC_CLIPBOARD_PROTOCOL=ext|wlr` - Force clipboard protocol
 //! - `XDP_GENERIC_CLIPBOARD_NO_FALLBACK=1` - Disable clipboard fallback
 //! - `XDP_GENERIC_SOURCE_PICKER` - Path to external source picker tool
+//! - `XDP_GENERIC_AUTO_SELECT=first` - With no source picker, capture the first source
+//!   without asking (unset: a ScreenCast request with no picker is cancelled)
 //! - `XDP_GENERIC_COLOR_PICKER` - Path to external color picker tool
 //! - `XDP_GENERIC_COLOR_SCHEME` - Override color-scheme setting (0/1/2)
 //! - `XDP_GENERIC_ACCENT_COLOR` - Override accent color (r,g,b floats)

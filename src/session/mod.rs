@@ -6,5 +6,8 @@
 mod manager;
 mod state;
 
-pub use manager::{SessionManager, SessionManagerConfig};
+pub use manager::{
+    PERSISTENT_RESTORE_GRANT_LIFETIME, SessionManager, SessionManagerConfig,
+    TRANSIENT_RESTORE_GRANT_LIFETIME,
+};
 pub use state::{PersistMode, RestoreData, Session, SessionState};

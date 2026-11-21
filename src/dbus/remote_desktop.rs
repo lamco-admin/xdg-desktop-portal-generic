@@ -435,19 +435,21 @@ impl RemoteDesktopInterface {
             results.insert("clipboard_enabled".to_string(), OwnedVariant::from(true));
         }
 
-        // Include restore_data if persist_mode is set
-        if persist_mode != PersistMode::None && !sources.is_empty() {
+        // If persist_mode is set, record the source selection as a restore
+        // grant and hand back its token as restore_data.
+        if !sources.is_empty() {
             let output_names: Vec<String> = sources.iter().map(|s| s.name.clone()).collect();
-            let names_value = Variant::from(output_names);
-            let rd_tuple = Variant::from(("generic", 1u32, names_value));
-            if let Ok(rd_owned) = OwnedVariant::try_from(rd_tuple) {
-                results.insert("restore_data".to_string(), rd_owned);
+            if let Some(token) = manager.issue_restore_grant(app_id, output_names, persist_mode)
+                && let Some(rd) = super::screencast::restore_data_value(&token)
+            {
+                results.insert("restore_data".to_string(), rd);
+                results.insert(
+                    "persist_mode".to_string(),
+                    OwnedVariant::from(persist_mode.to_dbus()),
+                );
             }
-            results.insert(
-                "persist_mode".to_string(),
-                OwnedVariant::from(persist_mode.to_dbus()),
-            );
         }
+        drop(manager);
 
         tracing::info!(
             session_id = %session_handle,

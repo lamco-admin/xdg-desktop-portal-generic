@@ -18,6 +18,7 @@ use zbus::{Connection, ObjectPath, OwnedVariant, Variant};
 use super::{
     ClipboardInterface, RemoteDesktopInterface, RequestInterface, ScreenCastInterface,
     SessionInterface, SessionResources,
+    screencast::{AutoSelect, SourceSelectionConfig},
 };
 use crate::{
     error::Result,
@@ -334,6 +335,21 @@ impl Portal {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         false
+    }
+
+    /// Change how ScreenCast.SelectSources asks for sources.
+    async fn set_source_selection(&self, picker: Option<&str>, auto_select: AutoSelect) {
+        self.server
+            .object_server()
+            .interface::<_, ScreenCastInterface>(PATH)
+            .await
+            .unwrap()
+            .get_mut()
+            .await
+            .set_source_selection(SourceSelectionConfig {
+                picker: picker.map(str::to_string),
+                auto_select,
+            });
     }
 
     async fn session_exists(&self, session: &str) -> bool {
@@ -830,4 +846,180 @@ async fn selection_transfer_is_answerable_only_by_the_owner() {
     assert_eq!(error_name(&write), None);
     // Dropping the reply closes our end of the pipe, so the reader finishes.
     drop(write);
+}
+
+/// Create a ScreenCast session as `owner` and call SelectSources on it.
+/// Returns the session handle and the SelectSources response code.
+async fn screen_cast_select(
+    owner: &Connection,
+    tag: &str,
+    app_id: &str,
+    options: HashMap<&'static str, Variant<'static>>,
+) -> (String, u32) {
+    let session = format!("/org/freedesktop/portal/desktop/session/test/{tag}");
+    let reply = call(
+        owner,
+        PATH,
+        SCREEN_CAST,
+        "CreateSession",
+        &(
+            path(&format!(
+                "/org/freedesktop/portal/desktop/request/test/{tag}_c"
+            )),
+            path(&session),
+            app_id,
+            no_options(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response_code(&reply), 0);
+
+    let reply = call(
+        owner,
+        PATH,
+        SCREEN_CAST,
+        "SelectSources",
+        &(
+            path(&format!(
+                "/org/freedesktop/portal/desktop/request/test/{tag}_ss"
+            )),
+            path(&session),
+            app_id,
+            options,
+        ),
+    )
+    .await
+    .unwrap();
+    let code = response_code(&reply);
+    (session, code)
+}
+
+/// Start `owner`'s ScreenCast session; returns the reply's results.
+async fn screen_cast_start(
+    owner: &Connection,
+    session: &str,
+    tag: &str,
+    app_id: &str,
+) -> HashMap<String, OwnedVariant> {
+    let reply = call(
+        owner,
+        PATH,
+        SCREEN_CAST,
+        "Start",
+        &(
+            path(&format!(
+                "/org/freedesktop/portal/desktop/request/test/{tag}_st"
+            )),
+            path(session),
+            app_id,
+            "",
+            no_options(),
+        ),
+    )
+    .await
+    .unwrap();
+    let (code, results): (u32, HashMap<String, OwnedVariant>) = reply.body().deserialize().unwrap();
+    assert_eq!(code, 0);
+    results
+}
+
+async fn selected_source_names(portal: &Portal, session: &str) -> Vec<String> {
+    let manager = portal.session_manager.lock().await;
+    let session = manager.get_session(&path(session)).unwrap();
+    session.sources.iter().map(|s| s.name.clone()).collect()
+}
+
+#[tokio::test]
+async fn select_sources_without_consent_is_cancelled() {
+    let Some(portal) = Portal::start().await else {
+        return;
+    };
+    let owner = portal.client().await;
+
+    // No picker and auto-select off: nothing is captured.
+    portal
+        .set_source_selection(None, AutoSelect::Disabled)
+        .await;
+    let (session, code) = screen_cast_select(&owner, "noconsent", APP_ID, no_options()).await;
+    assert_eq!(code, 1);
+    assert_eq!(
+        selected_source_names(&portal, &session).await,
+        Vec::<String>::new()
+    );
+
+    // A picker that is cancelled doesn't fall back to auto-select.
+    portal
+        .set_source_selection(Some("false"), AutoSelect::First)
+        .await;
+    let (session, code) = screen_cast_select(&owner, "cancelled", APP_ID, no_options()).await;
+    assert_eq!(code, 1);
+    assert_eq!(
+        selected_source_names(&portal, &session).await,
+        Vec::<String>::new()
+    );
+
+    // Auto-select only when it is asked for and there is no picker.
+    portal.set_source_selection(None, AutoSelect::First).await;
+    let (session, code) = screen_cast_select(&owner, "auto", APP_ID, no_options()).await;
+    assert_eq!(code, 0);
+    assert_eq!(selected_source_names(&portal, &session).await, ["eDP-1"]);
+}
+
+#[tokio::test]
+async fn restore_data_is_honoured_only_for_a_grant_the_backend_issued() {
+    let Some(portal) = Portal::start().await else {
+        return;
+    };
+    let owner = portal.client().await;
+
+    // The user picks HDMI-A-1 for a persistent cast.
+    portal
+        .set_source_selection(Some("echo HDMI-A-1"), AutoSelect::Disabled)
+        .await;
+    let mut options = no_options();
+    options.insert("persist_mode", Variant::from(2u32));
+    let (session, code) = screen_cast_select(&owner, "first", APP_ID, options).await;
+    assert_eq!(code, 0);
+    let results = screen_cast_start(&owner, &session, "first", APP_ID).await;
+    let restore_data = results.get("restore_data").unwrap().try_clone().unwrap();
+
+    // From here on the picker always cancels, so only restore can select.
+    portal
+        .set_source_selection(Some("false"), AutoSelect::First)
+        .await;
+
+    // Forged restore data in the old format, naming an output, restores nothing.
+    let mut forged = no_options();
+    forged.insert(
+        "restore_data",
+        Variant::from(("generic", 1u32, Variant::from(vec!["eDP-1"]))),
+    );
+    let (_, code) = screen_cast_select(&owner, "forged", APP_ID, forged).await;
+    assert_eq!(code, 1);
+
+    // The real grant presented by another app restores nothing.
+    let mut stolen = no_options();
+    stolen.insert(
+        "restore_data",
+        Variant::from(restore_data.try_clone().unwrap()),
+    );
+    let (_, code) = screen_cast_select(&owner, "stolen", "org.example.Other", stolen).await;
+    assert_eq!(code, 1);
+
+    // The app the grant was issued to gets its selection back without a picker.
+    let mut restore = no_options();
+    restore.insert(
+        "restore_data",
+        Variant::from(restore_data.try_clone().unwrap()),
+    );
+    let (session, code) = screen_cast_select(&owner, "restored", APP_ID, restore).await;
+    assert_eq!(code, 0);
+    assert_eq!(selected_source_names(&portal, &session).await, ["HDMI-A-1"]);
+
+    // A grant is used once.
+    let mut again = no_options();
+    again.insert("restore_data", Variant::from(restore_data));
+    let (_, code) = screen_cast_select(&owner, "again", APP_ID, again).await;
+    assert_eq!(code, 1);
 }

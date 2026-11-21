@@ -26,10 +26,16 @@ pub struct ScreenCastInterface {
     pipewire_manager: Arc<PipeWireManager>,
     /// Input backend for session cleanup.
     input_backend: Arc<Mutex<Box<dyn InputBackend>>>,
+    /// How `SelectSources` asks for the user's choice, read from the
+    /// environment at startup.
+    source_selection: SourceSelectionConfig,
 }
 
 impl ScreenCastInterface {
     /// Create a new `ScreenCast` interface with a capture backend.
+    ///
+    /// Reads `XDP_GENERIC_SOURCE_PICKER` and `XDP_GENERIC_AUTO_SELECT` from
+    /// the environment.
     pub fn new(
         session_manager: Arc<Mutex<SessionManager>>,
         capture_backend: Arc<Mutex<Box<dyn CaptureBackend>>>,
@@ -41,7 +47,14 @@ impl ScreenCastInterface {
             capture_backend,
             pipewire_manager,
             input_backend,
+            source_selection: SourceSelectionConfig::from_env(),
         }
+    }
+
+    /// Replace the source selection settings read at construction.
+    #[cfg(test)]
+    pub(crate) fn set_source_selection(&mut self, config: SourceSelectionConfig) {
+        self.source_selection = config;
     }
 
     /// The backends this interface's sessions hold resources in.
@@ -79,50 +92,41 @@ impl ScreenCastInterface {
     /// Try to parse `restore_data` from D-Bus options.
     ///
     /// The `restore_data` option is a `(suv)` tuple: (vendor, version, data).
-    /// We only accept vendor `"generic"` and version `1`. The data variant
-    /// contains a string array of output names.
+    /// We only accept vendor `"generic"` and version
+    /// [`RESTORE_DATA_VERSION`], whose data is the token of a restore grant.
+    /// Version 1, which carried output names, is ignored: it was never
+    /// backed by anything the backend held, so anyone could forge it.
     fn parse_restore_data(options: &HashMap<String, OwnedVariant>) -> Option<RestoreData> {
         let rd = options.get("restore_data")?;
-        // Try to decode the (suv) structure
         let value: &Variant<'_> = rd.downcast_ref().ok()?;
-        if let Variant::Structure(s) = value {
-            let fields = s.fields();
-            if fields.len() >= 3 {
-                let vendor: &str = fields[0].downcast_ref().ok()?;
-                if vendor != "generic" {
-                    tracing::debug!(vendor, "Unknown restore_data vendor, ignoring");
-                    return None;
-                }
-                let version = u32::try_from(&fields[1]).ok()?;
-                if version != 1 {
-                    tracing::debug!(version, "Unknown restore_data version, ignoring");
-                    return None;
-                }
-                // Data variant: try to extract as array of strings
-                if let Variant::Variant(inner) = &fields[2]
-                    && let Variant::Array(arr) = inner.as_ref()
-                {
-                    let names: Vec<String> = arr
-                        .iter()
-                        .filter_map(|v| {
-                            if let Variant::Str(s) = v {
-                                Some(s.to_string())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    if !names.is_empty() {
-                        return Some(RestoreData {
-                            vendor: vendor.to_string(),
-                            version,
-                            output_names: names,
-                        });
-                    }
-                }
-            }
+        let Variant::Structure(s) = value else {
+            return None;
+        };
+        let fields = s.fields();
+        if fields.len() != 3 {
+            return None;
         }
-        None
+        let vendor: &str = fields[0].downcast_ref().ok()?;
+        if vendor != "generic" {
+            tracing::debug!(vendor, "Unknown restore_data vendor, ignoring");
+            return None;
+        }
+        let version = u32::try_from(&fields[1]).ok()?;
+        if version != RESTORE_DATA_VERSION {
+            tracing::debug!(version, "Unsupported restore_data version, ignoring");
+            return None;
+        }
+        let Variant::Variant(inner) = &fields[2] else {
+            return None;
+        };
+        let Variant::Str(token) = inner.as_ref() else {
+            return None;
+        };
+        Some(RestoreData {
+            vendor: vendor.to_string(),
+            version,
+            token: token.to_string(),
+        })
     }
 
     /// Build stream results for D-Bus response.
@@ -292,47 +296,68 @@ impl ScreenCastInterface {
         let restore_data = Self::parse_restore_data(&options);
         let persist_mode = Self::get_persist_mode(&options);
 
-        let mut manager = self.session_manager.lock().await;
-        manager.validate_session(&session_handle, app_id, &sender)?;
+        // Check the caller, and redeem a restore grant if one is offered,
+        // before asking anyone anything.
+        let restored_names = {
+            let mut manager = self.session_manager.lock().await;
+            manager.validate_session(&session_handle, app_id, &sender)?;
+            restore_data
+                .as_ref()
+                .and_then(|rd| manager.redeem_restore_grant(app_id, &rd.token))
+        };
+        if restore_data.is_some() && restored_names.is_none() {
+            tracing::info!(
+                app_id = %app_id,
+                "Restore data names no grant this backend holds for the app, asking the user"
+            );
+        }
 
         // Get available sources from capture backend
-        let backend = self.capture_backend.lock().await;
-        let sources = backend
+        let sources = self
+            .capture_backend
+            .lock()
+            .await
             .get_sources(&source_types)
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
 
         if sources.is_empty() {
             tracing::warn!("No sources available for capture");
+            request.finish().await;
             return Ok((Response::Other.to_u32(), empty_results()));
         }
 
-        drop(backend);
+        let restored: Vec<SourceInfo> = restored_names
+            .iter()
+            .flatten()
+            .filter_map(|name| sources.iter().find(|s| s.name == *name).cloned())
+            .collect();
 
-        // Try to restore previous selection from restore_data
-        let selected_sources = if let Some(ref rd) = restore_data {
-            let restored: Vec<SourceInfo> = rd
-                .output_names
-                .iter()
-                .filter_map(|name| sources.iter().find(|s| s.name == *name).cloned())
-                .collect();
-
-            if restored.is_empty() {
-                tracing::debug!(
-                    "Restore data output names don't match current outputs, using picker"
-                );
-                select_sources_with_picker(&sources, multiple)
-            } else {
-                tracing::info!(
-                    count = restored.len(),
-                    names = ?rd.output_names,
-                    "Restored sources from persist data"
-                );
-                restored
-            }
+        let selection = if restored.is_empty() {
+            // The picker waits on the user, so it runs on a blocking thread and
+            // without the session manager lock.
+            let config = self.source_selection.clone();
+            tokio::task::spawn_blocking(move || {
+                select_sources_interactively(&sources, multiple, &config)
+            })
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(format!("Source selection failed: {e}")))?
         } else {
-            select_sources_with_picker(&sources, multiple)
+            tracing::info!(
+                count = restored.len(),
+                names = ?restored.iter().map(|s| &s.name).collect::<Vec<_>>(),
+                "Restored sources from a restore grant"
+            );
+            SourceSelection::Selected(restored)
         };
 
+        let SourceSelection::Selected(selected_sources) = selection else {
+            request.finish().await;
+            return Ok((Response::Cancelled.to_u32(), empty_results()));
+        };
+
+        let mut manager = self.session_manager.lock().await;
+        // The session may have ended while the user was choosing.
+        manager.validate_session(&session_handle, app_id, &sender)?;
         let session = manager
             .get_session_mut(&session_handle)
             .ok_or_else(|| PortalError::SessionNotFound(session_handle.to_string()))?;
@@ -340,6 +365,7 @@ impl ScreenCastInterface {
         session.persist_mode = persist_mode;
         session.restore_data = restore_data;
         session.select_sources(selected_sources)?;
+        drop(manager);
 
         // Remove Request object after method completes
         request.finish().await;
@@ -418,20 +444,19 @@ impl ScreenCastInterface {
 
         let mut results = Self::build_stream_results(&streams);
 
-        // If persist_mode is set, generate and return restore_data
-        if persist_mode != PersistMode::None {
-            let output_names: Vec<String> = sources.iter().map(|s| s.name.clone()).collect();
-            // Build restore_data as (suv): ("generic", 1, variant(as))
-            let names_value = Variant::from(output_names);
-            let rd_tuple = Variant::from(("generic", 1u32, names_value));
-            if let Ok(rd_owned) = OwnedVariant::try_from(rd_tuple) {
-                results.insert("restore_data".to_string(), rd_owned);
-            }
+        // If persist_mode is set, record the selection as a restore grant and
+        // hand back its token as restore_data.
+        let output_names: Vec<String> = sources.iter().map(|s| s.name.clone()).collect();
+        if let Some(token) = manager.issue_restore_grant(app_id, output_names, persist_mode)
+            && let Some(rd) = restore_data_value(&token)
+        {
+            results.insert("restore_data".to_string(), rd);
             results.insert(
                 "persist_mode".to_string(),
                 OwnedVariant::from(persist_mode.to_dbus()),
             );
         }
+        drop(manager);
 
         tracing::info!(
             session_id = %session_handle,
@@ -524,59 +549,150 @@ impl ScreenCastInterface {
     }
 }
 
-/// Select sources using an external picker tool, or auto-select on fallback.
+/// Format version of the `restore_data` this backend issues and accepts.
+const RESTORE_DATA_VERSION: u32 = 2;
+
+/// Build `restore_data` (`(suv)`: vendor, version, token) for a restore grant.
+pub(super) fn restore_data_value(token: &str) -> Option<OwnedVariant> {
+    OwnedVariant::try_from(Variant::from((
+        "generic",
+        RESTORE_DATA_VERSION,
+        Variant::from(token),
+    )))
+    .ok()
+}
+
+/// What `SelectSources` selects when no picker is configured.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum AutoSelect {
+    /// Select nothing, so the request is cancelled. The default: capturing
+    /// the screen without anyone choosing to is not something to fall into.
+    #[default]
+    Disabled,
+    /// Select the first source (`XDP_GENERIC_AUTO_SELECT=first`).
+    First,
+}
+
+impl AutoSelect {
+    /// Parse a `XDP_GENERIC_AUTO_SELECT` value.
+    fn parse(value: Option<&str>) -> Self {
+        match value.map(str::trim) {
+            None | Some("") => Self::Disabled,
+            Some("first") => Self::First,
+            Some(other) => {
+                tracing::warn!(
+                    value = other,
+                    "Unknown XDP_GENERIC_AUTO_SELECT value (expected \"first\"), auto-select stays off"
+                );
+                Self::Disabled
+            }
+        }
+    }
+}
+
+/// How `SelectSources` gets the user's choice of sources.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SourceSelectionConfig {
+    /// External picker command (`XDP_GENERIC_SOURCE_PICKER`).
+    pub(crate) picker: Option<String>,
+    /// What to select when no picker is configured
+    /// (`XDP_GENERIC_AUTO_SELECT`).
+    pub(crate) auto_select: AutoSelect,
+}
+
+impl SourceSelectionConfig {
+    /// Read the settings from the environment.
+    pub(crate) fn from_env() -> Self {
+        Self {
+            picker: std::env::var("XDP_GENERIC_SOURCE_PICKER")
+                .ok()
+                .filter(|cmd| !cmd.trim().is_empty()),
+            auto_select: AutoSelect::parse(
+                std::env::var("XDP_GENERIC_AUTO_SELECT").ok().as_deref(),
+            ),
+        }
+    }
+}
+
+/// The outcome of asking for sources.
+#[derive(Debug)]
+enum SourceSelection {
+    /// The sources to capture.
+    Selected(Vec<SourceInfo>),
+    /// Nothing was chosen; the request ends with `Response::Cancelled`.
+    Cancelled,
+}
+
+/// Ask the user for sources through the configured picker.
 ///
 /// # Configuration
 ///
-/// - `XDP_GENERIC_SOURCE_PICKER` — Path to external source picker tool.
+/// - `XDP_GENERIC_SOURCE_PICKER`: path to an external source picker tool.
 ///   The tool receives source names (one per line) on stdin and should write
 ///   the selected source name(s) to stdout (one per line).
+/// - `XDP_GENERIC_AUTO_SELECT=first`: with no picker configured, select the
+///   first source without asking.
 ///
-/// - If the tool exits with non-zero status, the selection is cancelled.
-/// - If no picker is configured, auto-selects the first source.
+/// A picker that exits with a non-zero status, can't be started, or selects
+/// nothing cancels the request; so does having neither a picker nor
+/// auto-select. Auto-select is never a fallback for a picker.
 ///
 /// # Multi-select
 ///
 /// When `multiple` is true, the picker may return multiple selections.
 /// When false, only the first selection is used.
-fn select_sources_with_picker(sources: &[SourceInfo], multiple: bool) -> Vec<SourceInfo> {
-    // Check for external picker tool
-    if let Ok(picker_cmd) = std::env::var("XDP_GENERIC_SOURCE_PICKER") {
-        match run_source_picker(&picker_cmd, sources) {
-            Ok(selected) => {
-                if selected.is_empty() {
-                    tracing::info!("Source picker returned no selections, using auto-select");
+fn select_sources_interactively(
+    sources: &[SourceInfo],
+    multiple: bool,
+    config: &SourceSelectionConfig,
+) -> SourceSelection {
+    if let Some(picker_cmd) = &config.picker {
+        return match run_source_picker(picker_cmd, sources) {
+            Ok(selected) if !selected.is_empty() => {
+                let result: Vec<SourceInfo> = if multiple {
+                    selected
                 } else {
-                    let result = if multiple {
-                        selected
-                    } else {
-                        selected.into_iter().take(1).collect()
-                    };
-                    tracing::info!(
-                        count = result.len(),
-                        sources = ?result.iter().map(|s| &s.name).collect::<Vec<_>>(),
-                        "Sources selected via picker"
-                    );
-                    return result;
-                }
+                    selected.into_iter().take(1).collect()
+                };
+                tracing::info!(
+                    count = result.len(),
+                    sources = ?result.iter().map(|s| &s.name).collect::<Vec<_>>(),
+                    "Sources selected via picker"
+                );
+                SourceSelection::Selected(result)
+            }
+            Ok(_) => {
+                tracing::info!("Source picker selected nothing, cancelling");
+                SourceSelection::Cancelled
             }
             Err(e) => {
-                tracing::warn!(
+                tracing::info!(
                     error = %e,
                     picker = %picker_cmd,
-                    "Source picker failed, falling back to auto-select"
+                    "Source picker was cancelled or failed, cancelling"
                 );
+                SourceSelection::Cancelled
             }
-        }
+        };
     }
 
-    // Auto-select: first source (default behavior)
-    let selected = sources.first().cloned().into_iter().collect::<Vec<_>>();
-    tracing::debug!(
-        sources = ?selected.iter().map(|s| &s.name).collect::<Vec<_>>(),
-        "Auto-selected sources"
-    );
-    selected
+    match (config.auto_select, sources.first()) {
+        (AutoSelect::First, Some(first)) => {
+            tracing::info!(
+                source = %first.name,
+                "No source picker configured, XDP_GENERIC_AUTO_SELECT=first selects the first source"
+            );
+            SourceSelection::Selected(vec![first.clone()])
+        }
+        (AutoSelect::First, None) => SourceSelection::Cancelled,
+        (AutoSelect::Disabled, _) => {
+            tracing::warn!(
+                "No source picker configured (XDP_GENERIC_SOURCE_PICKER) and auto-select is off \
+                 (XDP_GENERIC_AUTO_SELECT), so the screen cast request is cancelled"
+            );
+            SourceSelection::Cancelled
+        }
+    }
 }
 
 /// Run an external source picker tool.
@@ -684,18 +800,104 @@ mod tests {
         ]
     }
 
+    fn config(picker: Option<&str>, auto_select: AutoSelect) -> SourceSelectionConfig {
+        SourceSelectionConfig {
+            picker: picker.map(str::to_string),
+            auto_select,
+        }
+    }
+
+    fn selected_names(selection: &SourceSelection) -> Vec<&str> {
+        match selection {
+            SourceSelection::Selected(sources) => sources.iter().map(|s| s.name.as_str()).collect(),
+            SourceSelection::Cancelled => panic!("expected a selection, got Cancelled"),
+        }
+    }
+
+    #[test]
+    fn test_no_picker_and_no_auto_select_cancels() {
+        let selection = select_sources_interactively(
+            &test_sources(),
+            false,
+            &config(None, AutoSelect::Disabled),
+        );
+        assert!(matches!(selection, SourceSelection::Cancelled));
+    }
+
     #[test]
     fn test_auto_select_first_source() {
-        let sources = test_sources();
-        let selected = select_sources_with_picker(&sources, false);
-        assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].name, "eDP-1");
+        let selection =
+            select_sources_interactively(&test_sources(), false, &config(None, AutoSelect::First));
+        assert_eq!(selected_names(&selection), ["eDP-1"]);
     }
 
     #[test]
     fn test_auto_select_empty_sources() {
-        let selected = select_sources_with_picker(&[], false);
-        assert!(selected.is_empty());
+        let selection = select_sources_interactively(&[], false, &config(None, AutoSelect::First));
+        assert!(matches!(selection, SourceSelection::Cancelled));
+    }
+
+    #[test]
+    fn test_picker_cancel_is_never_auto_selected() {
+        let sources = test_sources();
+        // Non-zero exit, a picker that can't be started, an empty answer and an
+        // answer naming no source all cancel, auto-select or not.
+        for picker in ["false", "/nonexistent/picker/tool", "true", "echo NOPE-1"] {
+            for auto in [AutoSelect::Disabled, AutoSelect::First] {
+                let selection =
+                    select_sources_interactively(&sources, true, &config(Some(picker), auto));
+                assert!(
+                    matches!(selection, SourceSelection::Cancelled),
+                    "picker {picker:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_picker_selection() {
+        let sources = test_sources();
+        let both = config(Some("printf eDP-1\\nHDMI-A-1\\n"), AutoSelect::Disabled);
+        assert_eq!(
+            selected_names(&select_sources_interactively(&sources, true, &both)),
+            ["eDP-1", "HDMI-A-1"]
+        );
+        assert_eq!(
+            selected_names(&select_sources_interactively(&sources, false, &both)),
+            ["eDP-1"]
+        );
+    }
+
+    #[test]
+    fn test_auto_select_parse() {
+        assert_eq!(AutoSelect::parse(None), AutoSelect::Disabled);
+        assert_eq!(AutoSelect::parse(Some("")), AutoSelect::Disabled);
+        assert_eq!(AutoSelect::parse(Some("first")), AutoSelect::First);
+        assert_eq!(AutoSelect::parse(Some("yes")), AutoSelect::Disabled);
+    }
+
+    #[test]
+    fn test_restore_data_round_trip() {
+        let mut options = HashMap::new();
+        options.insert(
+            "restore_data".to_string(),
+            restore_data_value("abc123").unwrap(),
+        );
+        let parsed = ScreenCastInterface::parse_restore_data(&options).unwrap();
+        assert_eq!(parsed.vendor, "generic");
+        assert_eq!(parsed.version, RESTORE_DATA_VERSION);
+        assert_eq!(parsed.token, "abc123");
+    }
+
+    #[test]
+    fn test_version_1_restore_data_is_ignored() {
+        let names = Variant::from(vec!["eDP-1".to_string()]);
+        let mut options = HashMap::new();
+        options.insert(
+            "restore_data".to_string(),
+            OwnedVariant::try_from(Variant::from(("generic", 1u32, names))).unwrap(),
+        );
+        assert!(ScreenCastInterface::parse_restore_data(&options).is_none());
     }
 
     #[test]

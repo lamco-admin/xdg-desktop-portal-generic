@@ -178,13 +178,36 @@ All configuration is via environment variables, set before the service starts
 | Variable | Value | Description |
 |----------|-------|-------------|
 | `XDP_GENERIC_SOURCE_PICKER` | path to executable | External tool for ScreenCast source selection UI |
+| `XDP_GENERIC_AUTO_SELECT` | `first` | With no source picker configured, select the first source without asking (default: unset, cancel) |
 | `XDP_GENERIC_COLOR_PICKER` | path to executable | External tool for Screenshot color picking |
+
+#### Choosing What a Screen Cast Captures
+
+A ScreenCast request captures only what the user chose. The backend asks
+the source picker. If the picker exits with a non-zero status, can't be
+started, or outputs nothing that names a source, the request is cancelled.
+
+With no source picker configured, the request is cancelled too, unless
+`XDP_GENERIC_AUTO_SELECT=first` is set, in which case the first source is
+captured without asking. Set it only where every application that can reach
+the portal may see that screen, such as a single-purpose kiosk or a test
+machine. A cancelled picker never falls back to it.
+
+An application that asked to persist its cast (`persist_mode` 1 or 2) gets
+back restore data it can present on a later request to skip the picker. The
+restore data is a token for a selection the backend keeps in memory, bound
+to the application's ID and used once; each persisting `Start` issues a new
+one. Transient grants last at most a day and persistent ones at most 30
+days, and all of them end when the backend exits, after which the user is
+asked again. Restore data issued by earlier versions, which named outputs
+directly, is ignored.
 
 #### Source Picker Protocol
 
 The source picker tool receives available sources on stdin as tab-separated
-lines (`name\ttype\tid`), one per line. It should output selected source names
-on stdout, one per line. Exit without output to cancel.
+lines (`name\tdescription\tWIDTHxHEIGHT`), one per line. It should output
+selected source names on stdout, one per line. Exit without output, or with
+a non-zero status, to cancel.
 
 Example using `fzf`:
 

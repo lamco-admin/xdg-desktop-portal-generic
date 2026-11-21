@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **A ScreenCast request captures only what someone chose.** With no
+  `XDP_GENERIC_SOURCE_PICKER`, `SelectSources` used to capture the first
+  output without asking, and a picker that exited non-zero or printed
+  nothing fell through to the same auto-select, although the picker
+  protocol documents both as a cancel. Each of these now answers
+  `Response::Cancelled`. The picker runs on a blocking thread and without
+  the session manager lock, so other sessions keep working while the user
+  chooses.
+- **`restore_data` can't be forged.** It carried output names, and any
+  caller presenting matching names skipped the picker. It's now a token
+  for a selection the backend issued at `Start`, bound to the application
+  ID, single-use and held in memory (at most a day for transient grants,
+  30 days for persistent ones, and never past the backend's exit).
+
+### Changed
+
+- **New setting `XDP_GENERIC_AUTO_SELECT=first`** restores the old
+  no-picker behaviour of capturing the first source without asking. Set it
+  only where that is acceptable, such as a kiosk or a test machine.
+  Without it, a backend with no source picker cancels every ScreenCast
+  request. `XDP_GENERIC_SOURCE_PICKER` and `XDP_GENERIC_AUTO_SELECT` are
+  read once at startup; the picker used to be read on every request.
+- **`restore_data` is version 2**, `("generic", 2, <token>)`. Version 1
+  restore data is ignored, so applications that persisted a cast ask the
+  user once more. `RestoreData` holds the token in place of
+  `output_names`.
+
 ## [1.3.0] - 2026-11-19
 
 ### Added
