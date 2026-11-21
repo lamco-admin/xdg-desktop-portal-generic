@@ -43,6 +43,9 @@ pub struct SessionManager {
     sessions: HashMap<String, Session>,
     /// Count of sessions per app for limit enforcement.
     app_session_count: HashMap<String, usize>,
+    /// Handle of the session whose `SetSelection` is current, if any. Only
+    /// that session is asked for the selection's data.
+    selection_owner: Option<String>,
     /// Configuration.
     config: SessionManagerConfig,
 }
@@ -58,6 +61,7 @@ impl SessionManager {
         Self {
             sessions: HashMap::new(),
             app_session_count: HashMap::new(),
+            selection_owner: None,
             config,
         }
     }
@@ -222,32 +226,35 @@ impl SessionManager {
         Ok(session)
     }
 
+    /// Take a session out of the manager, keeping the per-app counts and
+    /// the selection owner consistent, and mark it closed.
+    fn remove_session(&mut self, handle: &str) -> Option<Session> {
+        let mut session = self.sessions.remove(handle)?;
+        if let Some(count) = self.app_session_count.get_mut(&session.app_id) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.app_session_count.remove(&session.app_id);
+            }
+        }
+        if self.selection_owner.as_deref() == Some(handle) {
+            self.selection_owner = None;
+        }
+        session.close();
+        Some(session)
+    }
+
     /// Close and remove a session.
     ///
     /// This marks the session as closed and removes it from the manager.
     /// Returns the closed session for resource cleanup.
     pub fn close_session(&mut self, session_handle: &ObjectPath<'_>) -> Option<Session> {
-        if let Some(mut session) = self.sessions.remove(session_handle.as_str()) {
-            session.close();
-
-            // Update counts
-            if let Some(count) = self.app_session_count.get_mut(&session.app_id) {
-                *count = count.saturating_sub(1);
-                if *count == 0 {
-                    self.app_session_count.remove(&session.app_id);
-                }
-            }
-
-            tracing::info!(
-                session_id = %session_handle,
-                app_id = %session.app_id,
-                "Session removed from manager"
-            );
-
-            Some(session)
-        } else {
-            None
-        }
+        let session = self.remove_session(session_handle.as_str())?;
+        tracing::info!(
+            session_id = %session_handle,
+            app_id = %session.app_id,
+            "Session removed from manager"
+        );
+        Some(session)
     }
 
     /// Close all sessions for an application.
@@ -261,16 +268,10 @@ impl SessionManager {
             .map(|(h, _)| h.clone())
             .collect();
 
-        let mut closed = Vec::new();
-        for handle in handles_to_close {
-            if let Some(mut session) = self.sessions.remove(&handle) {
-                session.close();
-                closed.push(session);
-            }
-        }
-
-        // Update counts
-        self.app_session_count.remove(app_id);
+        let closed: Vec<Session> = handles_to_close
+            .iter()
+            .filter_map(|handle| self.remove_session(handle))
+            .collect();
 
         if !closed.is_empty() {
             tracing::info!(
@@ -294,20 +295,10 @@ impl SessionManager {
             .map(|(h, _)| h.clone())
             .collect();
 
-        let mut closed = Vec::new();
-        for handle in handles_to_close {
-            if let Some(mut session) = self.sessions.remove(&handle) {
-                // Update app counts
-                if let Some(count) = self.app_session_count.get_mut(&session.app_id) {
-                    *count = count.saturating_sub(1);
-                    if *count == 0 {
-                        self.app_session_count.remove(&session.app_id);
-                    }
-                }
-                session.close();
-                closed.push(session);
-            }
-        }
+        let closed: Vec<Session> = handles_to_close
+            .iter()
+            .filter_map(|handle| self.remove_session(handle))
+            .collect();
 
         if !closed.is_empty() {
             tracing::info!(
@@ -362,6 +353,23 @@ impl SessionManager {
             .collect()
     }
 
+    /// Record that `session_handle` set the clipboard selection.
+    ///
+    /// From now on transfers of the selection's data are asked of that
+    /// session alone, until another session sets the selection or this one
+    /// ends.
+    pub fn set_selection_owner(&mut self, session_handle: &ObjectPath<'_>) {
+        self.selection_owner = Some(session_handle.to_string());
+    }
+
+    /// The session whose `SetSelection` is current, if it is still open and
+    /// still has the clipboard enabled.
+    pub fn selection_owner(&self) -> Option<ObjectPath<'static>> {
+        let session = self.sessions.get(self.selection_owner.as_deref()?)?;
+        (session.clipboard_enabled && session.state != super::state::SessionState::Closed)
+            .then(|| session.id.clone())
+    }
+
     /// Get session handles for all non-closed InputCapture sessions.
     ///
     /// Used to fan out `ZonesChanged` when monitor geometry changes.
@@ -412,21 +420,10 @@ impl SessionManager {
             }
         }
 
-        let mut closed = Vec::new();
-        for handle in stale_handles {
-            if let Some(mut session) = self.sessions.remove(&handle) {
-                if let Some(count) = self.app_session_count.get_mut(&session.app_id) {
-                    *count = count.saturating_sub(1);
-                    if *count == 0 {
-                        self.app_session_count.remove(&session.app_id);
-                    }
-                }
-                session.close();
-                closed.push(session);
-            }
-        }
-
-        closed
+        stale_handles
+            .iter()
+            .filter_map(|handle| self.remove_session(handle))
+            .collect()
     }
 }
 
@@ -824,6 +821,39 @@ mod tests {
         let handles = manager.clipboard_session_handles();
         assert_eq!(handles.len(), 1);
         assert_eq!(handles[0], h2);
+    }
+
+    #[test]
+    fn test_selection_owner_follows_set_selection_and_close() {
+        let mut manager = SessionManager::new();
+        let h1 = SessionManager::generate_session_handle();
+        let h2 = SessionManager::generate_session_handle();
+        for (handle, sender) in [(&h1, ":1.1"), (&h2, ":1.2")] {
+            manager
+                .create_session(
+                    handle.clone(),
+                    sender.to_string(),
+                    "app".to_string(),
+                    PersistMode::None,
+                )
+                .unwrap()
+                .request_clipboard()
+                .unwrap();
+        }
+
+        assert_eq!(manager.selection_owner(), None);
+        manager.set_selection_owner(&h1);
+        assert_eq!(manager.selection_owner(), Some(h1.clone()));
+        manager.set_selection_owner(&h2);
+        assert_eq!(manager.selection_owner(), Some(h2.clone()));
+
+        // The owner ending clears it; it doesn't fall back to another session.
+        manager.close_session(&h2);
+        assert_eq!(manager.selection_owner(), None);
+
+        manager.set_selection_owner(&h1);
+        manager.close_sender_sessions(":1.1");
+        assert_eq!(manager.selection_owner(), None);
     }
 
     #[test]

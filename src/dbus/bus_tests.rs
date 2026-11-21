@@ -207,6 +207,7 @@ struct Portal {
     server: Connection,
     session_manager: Arc<Mutex<SessionManager>>,
     resources: SessionResources,
+    pending_writes: super::PendingWrites,
     recorded: Recorded,
     address: String,
     // Declared last so the connections above close before the daemon dies.
@@ -236,6 +237,9 @@ impl Portal {
             None,
         );
 
+        let clipboard = ClipboardInterface::new(Arc::clone(&session_manager), None);
+        let pending_writes = clipboard.pending_writes();
+
         let server = zbus::connection::Builder::address(bus.address.as_str())
             .name(NAME)
             .serve_at(
@@ -257,10 +261,7 @@ impl Portal {
                     Arc::clone(&input),
                 ),
             )
-            .serve_at(
-                PATH,
-                ClipboardInterface::new(Arc::clone(&session_manager), None),
-            )
+            .serve_at(PATH, clipboard)
             .build()
             .await
             .unwrap();
@@ -269,6 +270,7 @@ impl Portal {
             server,
             session_manager,
             resources,
+            pending_writes,
             recorded,
             address: bus.address.clone(),
             _bus: bus,
@@ -755,4 +757,77 @@ async fn request_close_checks_the_sender_and_tears_down() {
         portal.recorded.destroyed_streams.lock().unwrap().as_slice(),
         [vec![101]]
     );
+}
+
+#[tokio::test]
+async fn selection_transfer_is_answerable_only_by_the_owner() {
+    let Some(portal) = Portal::start().await else {
+        return;
+    };
+    let owner = portal.client().await;
+    let other = portal.client().await;
+    let owner_session = create_remote_desktop(&owner, "clip_owner").await;
+    let other_session = create_remote_desktop(&other, "clip_other").await;
+    for (conn, session) in [(&owner, &owner_session), (&other, &other_session)] {
+        let request = (path(session), no_options());
+        let reply = call(conn, PATH, CLIPBOARD, "RequestClipboard", &request).await;
+        assert_eq!(error_name(&reply), None);
+    }
+
+    let mut options = no_options();
+    options.insert("mime_types", Variant::from(vec!["text/plain"]));
+    let set = call(
+        &owner,
+        PATH,
+        CLIPBOARD,
+        "SetSelection",
+        &(path(&owner_session), options),
+    )
+    .await;
+    assert_eq!(error_name(&set), None);
+
+    let serial = 4242;
+    let target = super::issue_selection_transfer(
+        &*portal.session_manager.lock().await,
+        &portal.pending_writes,
+        "text/plain",
+        serial,
+    );
+    assert_eq!(
+        target.as_ref().map(ObjectPath::as_str),
+        Some(owner_session.as_str())
+    );
+
+    // The other session has the clipboard too, but the serial isn't its own.
+    let write = call(
+        &other,
+        PATH,
+        CLIPBOARD,
+        "SelectionWrite",
+        &(path(&other_session), serial),
+    )
+    .await;
+    assert_eq!(error_name(&write).as_deref(), Some(ACCESS_DENIED));
+    let done = call(
+        &other,
+        PATH,
+        CLIPBOARD,
+        "SelectionWriteDone",
+        &(path(&other_session), serial, true),
+    )
+    .await;
+    assert_eq!(error_name(&done).as_deref(), Some(ACCESS_DENIED));
+    assert!(portal.pending_writes.lock().unwrap().contains_key(&serial));
+
+    let write = call(
+        &owner,
+        PATH,
+        CLIPBOARD,
+        "SelectionWrite",
+        &(path(&owner_session), serial),
+    )
+    .await;
+    assert_eq!(error_name(&write), None);
+    // Dropping the reply closes our end of the pipe, so the reader finishes.
+    drop(write);
 }

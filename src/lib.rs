@@ -522,55 +522,52 @@ impl PortalBackend {
                     );
                 }
                 ClipboardSignal::SelectionTransfer { mime_type, serial } => {
+                    // Ask only the session that set the selection; any other
+                    // session could answer with data of its own.
                     let manager = session_manager.lock().await;
-                    let handles = manager.clipboard_session_handles();
+                    let owner = dbus::issue_selection_transfer(
+                        &manager,
+                        &pending_writes,
+                        &mime_type,
+                        serial,
+                    );
                     drop(manager);
 
-                    if handles.is_empty() {
-                        continue;
-                    }
-
-                    // Register a pending write entry so SelectionWrite can store data
-                    if let Ok(mut writes) = pending_writes.lock() {
-                        writes.insert(
+                    let Some(owner) = owner else {
+                        tracing::warn!(
                             serial,
-                            dbus::PendingWriteEntry {
-                                mime_type: mime_type.clone(),
-                                data: None,
-                            },
+                            mime_type = %mime_type,
+                            "Selection transfer requested but no session owns the selection"
                         );
-                    }
+                        continue;
+                    };
 
                     let iface_ref = connection
                         .object_server()
                         .interface::<_, dbus::ClipboardInterface>("/org/freedesktop/portal/desktop")
                         .await;
 
-                    if let Ok(iface) = iface_ref {
-                        let ctx = iface.signal_emitter();
-                        for handle in &handles {
-                            if let Err(e) = dbus::ClipboardInterface::emit_selection_transfer(
-                                ctx,
-                                handle.clone(),
-                                &mime_type,
-                                serial,
-                            )
-                            .await
-                            {
-                                tracing::warn!(
-                                    session = %handle,
-                                    error = %e,
-                                    "Failed to emit SelectionTransfer signal"
-                                );
-                            }
-                        }
+                    if let Ok(iface) = iface_ref
+                        && let Err(e) = dbus::ClipboardInterface::emit_selection_transfer(
+                            iface.signal_emitter(),
+                            owner.clone(),
+                            &mime_type,
+                            serial,
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            session = %owner,
+                            error = %e,
+                            "Failed to emit SelectionTransfer signal"
+                        );
                     }
 
                     tracing::debug!(
                         serial = serial,
                         mime_type = %mime_type,
-                        session_count = handles.len(),
-                        "Emitted SelectionTransfer to clipboard sessions"
+                        session = %owner,
+                        "Emitted SelectionTransfer to the selection owner"
                     );
                 }
             }

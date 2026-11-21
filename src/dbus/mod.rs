@@ -22,7 +22,8 @@ mod settings;
 use std::collections::HashMap;
 
 pub use clipboard::{
-    ClipboardInterface, ClipboardSignal, PendingWriteEntry, PendingWrites, next_clipboard_serial,
+    ClipboardInterface, ClipboardSignal, PendingWriteEntry, PendingWrites,
+    issue_selection_transfer, next_clipboard_serial,
 };
 pub use input_capture::{
     InputCaptureInterface, activated_options, deactivated_options, emit_zones_changed,

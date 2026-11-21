@@ -57,10 +57,70 @@ pub type PendingWrites = Arc<std::sync::Mutex<HashMap<u32, PendingWriteEntry>>>;
 /// Entry in the pending writes map.
 #[derive(Debug, Clone)]
 pub struct PendingWriteEntry {
+    /// Handle of the session the serial was issued to: the selection owner
+    /// when the transfer was asked for. Only that session may write it.
+    pub session_handle: String,
     /// MIME type for this transfer.
     pub mime_type: String,
     /// Data written by the client (populated after `SelectionWriteDone`).
     pub data: Option<Vec<u8>>,
+}
+
+/// Issue a serial for a transfer the compositor asked for, to the session
+/// that owns the selection.
+///
+/// Returns the session to send `SelectionTransfer` to, or `None` when no
+/// open session owns the selection, in which case no serial is issued. The
+/// signal goes to the owner alone: any other session could answer it with
+/// bytes of its own.
+pub fn issue_selection_transfer(
+    manager: &SessionManager,
+    pending_writes: &PendingWrites,
+    mime_type: &str,
+    serial: u32,
+) -> Option<ObjectPath<'static>> {
+    let owner = manager.selection_owner()?;
+    let Ok(mut writes) = pending_writes.lock() else {
+        return None;
+    };
+    writes.insert(
+        serial,
+        PendingWriteEntry {
+            session_handle: owner.to_string(),
+            mime_type: mime_type.to_string(),
+            data: None,
+        },
+    );
+    Some(owner)
+}
+
+/// Whether `serial` is a pending transfer issued to `session_handle`.
+fn transfer_issued_to(pending_writes: &PendingWrites, serial: u32, session_handle: &str) -> bool {
+    pending_writes.lock().is_ok_and(|writes| {
+        writes
+            .get(&serial)
+            .is_some_and(|entry| entry.session_handle == session_handle)
+    })
+}
+
+/// Refuse a write for a serial that wasn't issued to this session.
+fn check_transfer_issued_to(
+    pending_writes: &PendingWrites,
+    serial: u32,
+    session_handle: &ObjectPath<'_>,
+) -> zbus::fdo::Result<()> {
+    if transfer_issued_to(pending_writes, serial, session_handle.as_str()) {
+        return Ok(());
+    }
+    tracing::warn!(
+        session_id = %session_handle,
+        serial,
+        "Clipboard write for a serial not issued to this session"
+    );
+    Err(PortalError::PermissionDenied(format!(
+        "Serial {serial} was not issued to session {session_handle}"
+    ))
+    .into())
 }
 
 /// Clipboard portal interface implementation.
@@ -226,6 +286,13 @@ impl ClipboardInterface {
                 .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
         }
 
+        // This session now owns the selection: transfers are asked of it alone.
+        let mut manager = self.session_manager.lock().await;
+        if manager.get_session(&session_handle).is_some() {
+            manager.set_selection_owner(&session_handle);
+        }
+        drop(manager);
+
         tracing::debug!(
             session_id = %session_handle,
             mime_types = ?mime_types,
@@ -256,12 +323,17 @@ impl ClipboardInterface {
         if !session.clipboard_enabled {
             return Err(PortalError::ClipboardNotEnabled.into());
         }
+        drop(manager);
+
+        check_transfer_issued_to(&self.pending_writes, serial, &session_handle)?;
 
         let (read_fd, write_fd) = create_pipe()?;
 
         let session_id = session_handle.to_string();
         let pending_writes = Arc::clone(&self.pending_writes);
-        tokio::spawn(async move {
+        // The read blocks until the client closes its end, so keep it off the
+        // async workers: a client that never closes would otherwise hold one.
+        tokio::task::spawn_blocking(move || {
             if let Err(e) = handle_selection_write(read_fd, serial, &pending_writes) {
                 tracing::error!(
                     session_id = %session_id,
@@ -318,7 +390,7 @@ impl ClipboardInterface {
         let (read_fd, write_fd) = create_pipe()?;
 
         if let Some(data) = data {
-            tokio::spawn(async move {
+            tokio::task::spawn_blocking(move || {
                 use std::io::Write;
                 let mut file = owned_fd_to_file(write_fd);
                 let _ = file.write_all(&data);
@@ -358,12 +430,21 @@ impl ClipboardInterface {
 
         drop(manager);
 
-        // Extract the written data from pending writes
+        // Extract the written data from pending writes, but only for a serial
+        // issued to this session: another session's serial stays pending.
         let entry = if let Ok(mut writes) = self.pending_writes.lock() {
-            writes.remove(&serial)
+            match writes.get(&serial) {
+                Some(entry) if entry.session_handle == session_handle.as_str() => {
+                    writes.remove(&serial)
+                }
+                _ => None,
+            }
         } else {
             None
         };
+        if entry.is_none() {
+            check_transfer_issued_to(&self.pending_writes, serial, &session_handle)?;
+        }
 
         // If write was successful and we have data, update the clipboard backend
         if success
@@ -535,6 +616,7 @@ mod tests {
     #[test]
     fn test_pending_write_entry() {
         let entry = PendingWriteEntry {
+            session_handle: "/s1".to_string(),
             mime_type: "text/plain".to_string(),
             data: None,
         };
@@ -542,6 +624,7 @@ mod tests {
         assert!(entry.data.is_none());
 
         let entry_with_data = PendingWriteEntry {
+            session_handle: "/s1".to_string(),
             mime_type: "text/html".to_string(),
             data: Some(b"<b>hello</b>".to_vec()),
         };
@@ -558,6 +641,7 @@ mod tests {
             map.insert(
                 42,
                 PendingWriteEntry {
+                    session_handle: "/s1".to_string(),
                     mime_type: "text/plain".to_string(),
                     data: None,
                 },
@@ -595,6 +679,7 @@ mod tests {
         writes.lock().unwrap().insert(
             serial,
             PendingWriteEntry {
+                session_handle: "/s1".to_string(),
                 mime_type: "text/plain".to_string(),
                 data: None,
             },
@@ -642,6 +727,46 @@ mod tests {
 
         // Verify map is still empty
         assert!(writes.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_selection_transfer_goes_to_the_owner_only() {
+        use crate::session::{PersistMode, SessionManager};
+
+        let mut manager = SessionManager::new();
+        let owner = SessionManager::generate_session_handle();
+        let other = SessionManager::generate_session_handle();
+        for (handle, sender) in [(&owner, ":1.1"), (&other, ":1.2")] {
+            manager
+                .create_session(
+                    handle.clone(),
+                    sender.to_string(),
+                    "app".to_string(),
+                    PersistMode::None,
+                )
+                .unwrap()
+                .request_clipboard()
+                .unwrap();
+        }
+        let writes: PendingWrites = Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+        // Nobody owns the selection: no serial is issued and nobody is asked.
+        assert_eq!(
+            issue_selection_transfer(&manager, &writes, "text/plain", 7),
+            None
+        );
+        assert!(writes.lock().unwrap().is_empty());
+
+        manager.set_selection_owner(&owner);
+        assert_eq!(
+            issue_selection_transfer(&manager, &writes, "text/plain", 8),
+            Some(owner.clone())
+        );
+        assert!(transfer_issued_to(&writes, 8, owner.as_str()));
+        assert!(!transfer_issued_to(&writes, 8, other.as_str()));
+        assert!(check_transfer_issued_to(&writes, 8, &other).is_err());
+        assert!(check_transfer_issued_to(&writes, 9, &owner).is_err());
+        assert!(check_transfer_issued_to(&writes, 8, &owner).is_ok());
     }
 
     #[test]
