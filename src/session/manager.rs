@@ -373,12 +373,16 @@ impl SessionManager {
             .collect()
     }
 
-    /// Clean up stale sessions that have been idle too long.
+    /// Clean up sessions that were created but never started.
     ///
     /// Sessions in `Init` state for longer than `max_idle` are considered stale
-    /// and removed. Started sessions idle for 2x `max_idle` are also removed.
+    /// and removed. Started sessions are never removed here, however long they
+    /// have been running: a screen cast that nobody touches is still in use.
+    /// They end on `Session.Close` or when their owner leaves the bus.
     ///
-    /// Returns the list of closed sessions for resource cleanup.
+    /// Returns the removed sessions. The caller must release their resources
+    /// and remove their D-Bus objects, as `Session.Close` does; see
+    /// `dbus::session::expire_stale_sessions`.
     pub fn cleanup_stale_sessions(&mut self, max_idle: std::time::Duration) -> Vec<Session> {
         use std::time::SystemTime;
 
@@ -400,20 +404,7 @@ impl SessionManager {
                         stale_handles.push(handle.clone());
                     }
                 }
-                super::state::SessionState::Started => {
-                    // Started sessions idle for 2x max_idle with no activity
-                    let since_activity = now
-                        .duration_since(session.last_activity)
-                        .unwrap_or_default();
-                    if since_activity > max_idle * 2 {
-                        tracing::debug!(
-                            session_id = %handle,
-                            idle_secs = since_activity.as_secs(),
-                            "Stale Started session detected (no activity)"
-                        );
-                        stale_handles.push(handle.clone());
-                    }
-                }
+                super::state::SessionState::Started => {}
                 super::state::SessionState::Closed => {
                     // Closed sessions shouldn't be in the map, but clean up just in case
                     stale_handles.push(handle.clone());
@@ -743,7 +734,41 @@ mod tests {
         // Cleanup with a 5-minute max idle — the 10-minute-old session should be removed
         let stale = manager.cleanup_stale_sessions(Duration::from_secs(300));
         assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].id, handle);
+        assert_eq!(stale[0].state, crate::session::state::SessionState::Closed);
         assert_eq!(manager.session_count(), 0);
+        assert_eq!(manager.app_session_count("com.example.app"), 0);
+    }
+
+    #[test]
+    fn test_started_session_survives_cleanup() {
+        use std::time::{Duration, SystemTime};
+
+        let mut manager = SessionManager::new();
+        let handle = SessionManager::generate_session_handle();
+
+        let session = manager
+            .create_session(
+                handle.clone(),
+                ":1.123".to_string(),
+                "com.example.app".to_string(),
+                PersistMode::None,
+            )
+            .unwrap();
+        session
+            .select_devices(crate::types::DeviceTypes::all())
+            .unwrap();
+        session.start(vec![]).unwrap();
+
+        // A day old with no recorded activity: long past any idle limit.
+        let day_ago = SystemTime::now() - Duration::from_secs(86_400);
+        session.created_at = day_ago;
+        session.started_at = Some(day_ago);
+        session.last_activity = day_ago;
+
+        let stale = manager.cleanup_stale_sessions(Duration::from_secs(300));
+        assert!(stale.is_empty());
+        assert!(manager.get_session(&handle).is_some());
     }
 
     #[test]

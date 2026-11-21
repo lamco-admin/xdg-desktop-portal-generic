@@ -155,7 +155,8 @@ pub struct Session {
     pub created_at: SystemTime,
     /// When the session was started (if started).
     pub started_at: Option<SystemTime>,
-    /// When the last activity occurred (updated on any D-Bus call for this session).
+    /// When [`Self::touch`] last recorded activity. Informational only:
+    /// sessions are never expired on it.
     pub last_activity: SystemTime,
 }
 
@@ -198,6 +199,8 @@ impl Session {
     }
 
     /// Record that activity occurred on this session.
+    ///
+    /// Updates [`Self::last_activity`], which nothing expires sessions on.
     pub fn touch(&mut self) {
         self.last_activity = SystemTime::now();
     }

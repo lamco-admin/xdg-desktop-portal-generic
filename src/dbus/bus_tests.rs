@@ -15,7 +15,10 @@ use std::{
 use tokio::sync::Mutex;
 use zbus::{Connection, ObjectPath, OwnedVariant, Variant};
 
-use super::{ClipboardInterface, RemoteDesktopInterface, ScreenCastInterface};
+use super::{
+    ClipboardInterface, RemoteDesktopInterface, ScreenCastInterface, SessionInterface,
+    SessionResources,
+};
 use crate::{
     error::Result,
     pipewire::PipeWireManager,
@@ -198,9 +201,10 @@ fn test_source(id: u32, name: &str) -> SourceInfo {
 
 /// The portal interfaces served on a private bus, with mock backends.
 struct Portal {
-    /// Held so the interfaces stay served for the test's lifetime.
-    _server: Connection,
+    /// The portal's own connection.
+    server: Connection,
     session_manager: Arc<Mutex<SessionManager>>,
+    resources: SessionResources,
     recorded: Recorded,
     address: String,
     // Declared last so the connections above close before the daemon dies.
@@ -223,6 +227,12 @@ impl Portal {
                 sources: vec![test_source(1, "eDP-1"), test_source(2, "HDMI-A-1")],
             })));
         let pipewire = Arc::new(PipeWireManager::detached());
+        let resources = SessionResources::new(
+            Arc::clone(&input),
+            Arc::clone(&capture),
+            Arc::clone(&pipewire),
+            None,
+        );
 
         let server = zbus::connection::Builder::address(bus.address.as_str())
             .name(NAME)
@@ -254,8 +264,9 @@ impl Portal {
             .unwrap();
 
         Some(Self {
-            _server: server,
+            server,
             session_manager,
+            resources,
             recorded,
             address: bus.address.clone(),
             _bus: bus,
@@ -268,6 +279,37 @@ impl Portal {
             .build()
             .await
             .unwrap()
+    }
+
+    /// Whether a `Session` object is still registered at `session`.
+    async fn session_object_exists(&self, session: &str) -> bool {
+        self.server
+            .object_server()
+            .interface::<_, SessionInterface>(path(session))
+            .await
+            .is_ok()
+    }
+
+    /// Make a session look as if it was created (and started) a day ago.
+    async fn backdate(&self, session: &str) {
+        let day_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
+        let mut manager = self.session_manager.lock().await;
+        let session = manager.get_session_mut(&path(session)).unwrap();
+        session.created_at = day_ago;
+        session.last_activity = day_ago;
+        if session.started_at.is_some() {
+            session.started_at = Some(day_ago);
+        }
+    }
+
+    async fn expire(&self) -> usize {
+        super::expire_stale_sessions(
+            self.server.object_server(),
+            &self.session_manager,
+            &self.resources,
+            std::time::Duration::from_secs(300),
+        )
+        .await
     }
 
     async fn session_exists(&self, session: &str) -> bool {
@@ -499,4 +541,80 @@ async fn clipboard_from_another_peer_is_refused() {
     let write = (path(&session), 1u32);
     let refused = call(&other, PATH, CLIPBOARD, "SelectionWrite", &write).await;
     assert_eq!(error_name(&refused).as_deref(), Some(ACCESS_DENIED));
+}
+
+#[tokio::test]
+async fn expired_init_session_gets_full_teardown() {
+    let Some(portal) = Portal::start().await else {
+        return;
+    };
+    let owner = portal.client().await;
+    let session = create_remote_desktop(&owner, "stale").await;
+    assert!(portal.session_object_exists(&session).await);
+
+    // Not yet stale: nothing happens.
+    assert_eq!(portal.expire().await, 0);
+
+    portal.backdate(&session).await;
+    assert_eq!(portal.expire().await, 1);
+
+    assert!(!portal.session_exists(&session).await);
+    assert!(!portal.session_object_exists(&session).await);
+    assert_eq!(
+        portal
+            .recorded
+            .destroyed_contexts
+            .lock()
+            .unwrap()
+            .as_slice(),
+        std::slice::from_ref(&session)
+    );
+}
+
+#[tokio::test]
+async fn started_session_survives_expiry_and_close_tears_it_down() {
+    let Some(portal) = Portal::start().await else {
+        return;
+    };
+    let owner = portal.client().await;
+    let session = create_remote_desktop(&owner, "long").await;
+    select_devices(&owner, &session, "long").await;
+    portal
+        .session_manager
+        .lock()
+        .await
+        .get_session_mut(&path(&session))
+        .unwrap()
+        .select_sources(vec![test_source(1, "eDP-1")])
+        .unwrap();
+    let reply = call(
+        &owner,
+        PATH,
+        REMOTE_DESKTOP,
+        "Start",
+        &(
+            path("/org/freedesktop/portal/desktop/request/test/long_s"),
+            path(&session),
+            APP_ID,
+            "",
+            no_options(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response_code(&reply), 0);
+
+    portal.backdate(&session).await;
+    assert_eq!(portal.expire().await, 0);
+    assert!(portal.session_exists(&session).await);
+    assert!(portal.session_object_exists(&session).await);
+    assert!(portal.recorded.destroyed_streams.lock().unwrap().is_empty());
+
+    let closed = call(&owner, &session, SESSION, "Close", &()).await;
+    assert_eq!(error_name(&closed), None);
+    assert_eq!(
+        portal.recorded.destroyed_streams.lock().unwrap().as_slice(),
+        [vec![101]]
+    );
+    assert!(!portal.session_object_exists(&session).await);
 }

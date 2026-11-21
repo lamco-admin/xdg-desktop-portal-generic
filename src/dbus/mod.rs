@@ -31,7 +31,8 @@ pub use remote_desktop::RemoteDesktopInterface;
 pub use request::RequestInterface;
 pub use screencast::ScreenCastInterface;
 pub use screenshot::ScreenshotInterface;
-pub use session::SessionInterface;
+pub use session::{SessionInterface, SessionResources};
+pub(crate) use session::{end_session, expire_stale_sessions};
 pub use settings::SettingsInterface;
 use zbus::OwnedVariant;
 

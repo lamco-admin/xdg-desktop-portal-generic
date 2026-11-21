@@ -142,6 +142,16 @@ impl InputCaptureInterface {
         Self::deactivated(signal_emitter, session_handle, options).await
     }
 
+    /// The backends this interface's sessions hold resources in.
+    fn session_resources(&self) -> super::SessionResources {
+        super::SessionResources::new(
+            Arc::clone(&self.input_backend),
+            Arc::clone(&self.capture_backend),
+            Arc::clone(&self.pipewire_manager),
+            self.input_capture_tx.clone(),
+        )
+    }
+
     /// Register the `Session` D-Bus object for a newly-created InputCapture session.
     async fn register_session_object(
         &self,
@@ -151,10 +161,7 @@ impl InputCaptureInterface {
         let session_iface = super::SessionInterface::new(
             Arc::clone(&self.session_manager),
             session_handle.to_owned(),
-            Arc::clone(&self.input_backend),
-            Arc::clone(&self.capture_backend),
-            Arc::clone(&self.pipewire_manager),
-            self.input_capture_tx.clone(),
+            self.session_resources(),
         );
         if let Err(e) = server.at(session_handle, session_iface).await {
             tracing::warn!(

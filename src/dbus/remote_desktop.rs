@@ -96,6 +96,16 @@ impl RemoteDesktopInterface {
         }
     }
 
+    /// The backends this interface's sessions hold resources in.
+    fn session_resources(&self) -> super::SessionResources {
+        super::SessionResources::new(
+            Arc::clone(&self.input_backend),
+            Arc::clone(&self.capture_backend),
+            Arc::clone(&self.pipewire_manager),
+            None,
+        )
+    }
+
     /// Extract `persist_mode` from options.
     fn get_persist_mode(options: &HashMap<String, OwnedVariant>) -> PersistMode {
         get_option_u32(options, "persist_mode").map_or(PersistMode::None, PersistMode::from_dbus)
@@ -239,10 +249,7 @@ impl RemoteDesktopInterface {
                 let session_iface = super::SessionInterface::new(
                     Arc::clone(&self.session_manager),
                     session_handle.to_owned(),
-                    Arc::clone(&self.input_backend),
-                    Arc::clone(&self.capture_backend),
-                    Arc::clone(&self.pipewire_manager),
-                    None,
+                    self.session_resources(),
                 );
                 if let Err(e) = server.at(&session_handle, session_iface).await {
                     tracing::warn!(

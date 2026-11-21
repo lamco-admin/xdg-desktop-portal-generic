@@ -319,23 +319,21 @@ impl PortalBackend {
             });
         }
 
+        // Every path that ends a session releases its resources here.
+        let resources = dbus::SessionResources::new(
+            Arc::clone(&self.input_backend),
+            Arc::clone(&self.capture_backend),
+            Arc::clone(&self.pipewire_manager),
+            self.input_capture_tx.clone(),
+        );
+
         // Spawn client disconnect monitor
         let session_manager = Arc::clone(&self.session_manager);
-        let input_backend = Arc::clone(&self.input_backend);
-        let capture_backend = Arc::clone(&self.capture_backend);
-        let pipewire_manager = Arc::clone(&self.pipewire_manager);
-        let input_capture_tx = self.input_capture_tx.clone();
+        let disconnect_resources = resources.clone();
         let dbus_conn = connection.clone();
         tokio::spawn(async move {
-            Self::monitor_client_disconnects(
-                dbus_conn,
-                session_manager,
-                input_backend,
-                capture_backend,
-                pipewire_manager,
-                input_capture_tx,
-            )
-            .await;
+            Self::monitor_client_disconnects(dbus_conn, session_manager, disconnect_resources)
+                .await;
         });
 
         // Spawn InputCapture activation bridge: Wayland barrier lock/unlock/
@@ -357,8 +355,9 @@ impl PortalBackend {
 
         // Spawn periodic session cleanup task
         let session_manager = Arc::clone(&self.session_manager);
+        let dbus_conn = connection.clone();
         tokio::spawn(async move {
-            Self::periodic_session_cleanup(session_manager).await;
+            Self::periodic_session_cleanup(dbus_conn, session_manager, resources).await;
         });
 
         // Spawn settings monitoring task (re-reads env vars periodically,
@@ -396,10 +395,7 @@ impl PortalBackend {
     async fn monitor_client_disconnects(
         connection: zbus::Connection,
         session_manager: Arc<Mutex<SessionManager>>,
-        input_backend: Arc<Mutex<Box<dyn InputBackend>>>,
-        capture_backend: Arc<Mutex<Box<dyn CaptureBackend>>>,
-        pipewire_manager: Arc<pipewire::PipeWireManager>,
-        input_capture_tx: Option<mpsc::Sender<wayland::InputCaptureCommand>>,
+        resources: dbus::SessionResources,
     ) {
         use futures::StreamExt;
 
@@ -438,48 +434,13 @@ impl PortalBackend {
                     let closed_sessions = manager.close_sender_sessions(disconnected_name);
                     drop(manager);
 
-                    // Clean up resources for closed sessions
+                    // Release the sessions' resources and remove their D-Bus
+                    // objects. `Session.Close()` removes its own object, but an
+                    // ungraceful disconnect never calls it, and a stale object
+                    // would stay addressable by path after its owner is gone.
+                    // The owner is gone, so there is nobody to send `Closed` to.
                     for session in &closed_sessions {
-                        let session_id = session.id.to_string();
-
-                        // Destroy input contexts
-                        let mut input = input_backend.lock().await;
-                        let _ = input.destroy_context(&session_id);
-                        drop(input);
-
-                        // Destroy capture streams
-                        if !session.streams.is_empty() {
-                            let stream_ids = session.stream_ids();
-                            let mut capture = capture_backend.lock().await;
-                            let _ = capture.destroy_capture_session(&stream_ids);
-                            drop(capture);
-
-                            // Destroy PipeWire streams
-                            for node_id in stream_ids {
-                                let _ = pipewire_manager.destroy_stream(node_id).await;
-                            }
-                        }
-
-                        // Destroy any InputCapture barrier surfaces
-                        if session.is_input_capture_session
-                            && let Some(tx) = &input_capture_tx
-                        {
-                            let _ = tx
-                                .send(wayland::InputCaptureCommand::DestroySession { session_id });
-                        }
-
-                        // Remove the session's own D-Bus object. `Session.Close()`
-                        // does this itself (`server.remove` in
-                        // `SessionInterface::close`), but an ungraceful
-                        // disconnect never calls `Close()`, so without this the
-                        // object stays registered on the bus after the owning
-                        // client, and its entry in `SessionManager`, are both
-                        // already gone -- a stale object a second client could
-                        // still address by path, even though every method on it
-                        // would now fail its own session-manager lookup.
-                        let _ = connection
-                            .object_server()
-                            .remove::<crate::dbus::SessionInterface, _>(&session.id)
+                        dbus::end_session(connection.object_server(), &resources, session, false)
                             .await;
                     }
                 }
@@ -1019,20 +980,32 @@ impl PortalBackend {
         }
     }
 
-    /// Periodically clean up stale sessions.
-    async fn periodic_session_cleanup(session_manager: Arc<Mutex<SessionManager>>) {
+    /// Periodically end sessions that were created but never started.
+    ///
+    /// Each one gets the same teardown as `Session.Close`. Started sessions
+    /// are never expired: they end on `Session.Close` or when their owner
+    /// leaves the bus.
+    async fn periodic_session_cleanup(
+        connection: zbus::Connection,
+        session_manager: Arc<Mutex<SessionManager>>,
+        resources: dbus::SessionResources,
+    ) {
         use std::time::Duration;
         let mut interval = tokio::time::interval(Duration::from_secs(60));
 
         loop {
             interval.tick().await;
 
-            let mut manager = session_manager.lock().await;
-            let stale = manager.cleanup_stale_sessions(Duration::from_secs(300));
-            drop(manager);
+            let count = dbus::expire_stale_sessions(
+                connection.object_server(),
+                &session_manager,
+                &resources,
+                Duration::from_secs(300),
+            )
+            .await;
 
-            if !stale.is_empty() {
-                tracing::info!(count = stale.len(), "Cleaned up stale sessions");
+            if count > 0 {
+                tracing::info!(count, "Cleaned up stale sessions");
             }
         }
     }
