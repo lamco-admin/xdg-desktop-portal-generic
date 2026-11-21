@@ -232,7 +232,7 @@ impl RemoteDesktopInterface {
         // Register Request object at handle path for cancellation support
         let request_iface =
             super::RequestInterface::new(Arc::clone(&self.session_manager), sender.clone());
-        let _ = server.at(&handle, request_iface).await;
+        let request = super::RequestGuard::register(server, &handle, request_iface).await?;
 
         let persist_mode = Self::get_persist_mode(&options);
 
@@ -273,7 +273,7 @@ impl RemoteDesktopInterface {
         };
 
         // Remove Request object after method completes
-        let _ = server.remove::<super::RequestInterface, _>(&handle).await;
+        request.finish().await;
         result
     }
 
@@ -309,8 +309,9 @@ impl RemoteDesktopInterface {
             Arc::clone(&self.session_manager),
             session_handle.to_string(),
             sender.clone(),
+            self.session_resources(),
         );
-        let _ = server.at(&handle, request_iface).await;
+        let request = super::RequestGuard::register(server, &handle, request_iface).await?;
 
         let device_types = Self::get_device_types(&options);
 
@@ -324,7 +325,7 @@ impl RemoteDesktopInterface {
         session.select_devices(device_types)?;
 
         // Remove Request object after method completes
-        let _ = server.remove::<super::RequestInterface, _>(&handle).await;
+        request.finish().await;
 
         Ok((Response::Success.to_u32(), empty_results()))
     }
@@ -368,8 +369,9 @@ impl RemoteDesktopInterface {
             Arc::clone(&self.session_manager),
             session_handle.to_string(),
             sender.clone(),
+            self.session_resources(),
         );
-        let _ = server.at(&handle, request_iface).await;
+        let request = super::RequestGuard::register(server, &handle, request_iface).await?;
 
         let mut manager = self.session_manager.lock().await;
         manager.validate_session(&session_handle, app_id, &sender)?;
@@ -456,7 +458,7 @@ impl RemoteDesktopInterface {
         );
 
         // Remove Request object after method completes
-        let _ = server.remove::<super::RequestInterface, _>(&handle).await;
+        request.finish().await;
 
         Ok((Response::Success.to_u32(), results))
     }

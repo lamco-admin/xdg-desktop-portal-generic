@@ -210,7 +210,7 @@ impl ScreenCastInterface {
         // Register Request object at handle path for cancellation support
         let request_iface =
             super::RequestInterface::new(Arc::clone(&self.session_manager), sender.clone());
-        let _ = server.at(&handle, request_iface).await;
+        let request = super::RequestGuard::register(server, &handle, request_iface).await?;
 
         let persist_mode = Self::get_persist_mode(&options);
 
@@ -251,7 +251,7 @@ impl ScreenCastInterface {
         };
 
         // Remove Request object after method completes
-        let _ = server.remove::<super::RequestInterface, _>(&handle).await;
+        request.finish().await;
         result
     }
 
@@ -283,8 +283,9 @@ impl ScreenCastInterface {
             Arc::clone(&self.session_manager),
             session_handle.to_string(),
             sender.clone(),
+            self.session_resources(),
         );
-        let _ = server.at(&handle, request_iface).await;
+        let request = super::RequestGuard::register(server, &handle, request_iface).await?;
 
         let source_types = Self::get_source_types(&options);
         let multiple = Self::get_multiple(&options);
@@ -341,7 +342,7 @@ impl ScreenCastInterface {
         session.select_sources(selected_sources)?;
 
         // Remove Request object after method completes
-        let _ = server.remove::<super::RequestInterface, _>(&handle).await;
+        request.finish().await;
 
         Ok((Response::Success.to_u32(), empty_results()))
     }
@@ -380,8 +381,9 @@ impl ScreenCastInterface {
             Arc::clone(&self.session_manager),
             session_handle.to_string(),
             sender.clone(),
+            self.session_resources(),
         );
-        let _ = server.at(&handle, request_iface).await;
+        let request = super::RequestGuard::register(server, &handle, request_iface).await?;
 
         let cursor_mode = Self::get_cursor_mode(&options);
 
@@ -439,7 +441,7 @@ impl ScreenCastInterface {
         );
 
         // Remove Request object after method completes
-        let _ = server.remove::<super::RequestInterface, _>(&handle).await;
+        request.finish().await;
 
         Ok((Response::Success.to_u32(), results))
     }

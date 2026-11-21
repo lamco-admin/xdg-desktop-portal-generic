@@ -15,8 +15,9 @@
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
-use zbus::interface;
+use zbus::{ObjectPath, interface};
 
+use super::SessionResources;
 use crate::{error::PortalError, session::SessionManager};
 
 /// Request interface for portal operations.
@@ -32,6 +33,9 @@ pub struct RequestInterface {
     /// Only that peer may close it. `None` for standalone requests, whose
     /// `Close` does nothing.
     owner: Option<String>,
+    /// Backends to release the session's resources in when `Close` ends
+    /// the session. Set exactly when `session_handle` is.
+    resources: Option<SessionResources>,
 }
 
 impl RequestInterface {
@@ -41,6 +45,7 @@ impl RequestInterface {
             session_manager,
             session_handle: None,
             owner: Some(owner),
+            resources: None,
         }
     }
 
@@ -53,19 +58,25 @@ impl RequestInterface {
             session_manager: Arc::new(Mutex::new(SessionManager::new())),
             session_handle: None,
             owner: None,
+            resources: None,
         }
     }
 
     /// Create a new request interface for a call `owner` made on a session.
+    ///
+    /// Closing the request ends the session, releasing its resources in
+    /// `resources`.
     pub fn for_session(
         session_manager: Arc<Mutex<SessionManager>>,
         session_handle: String,
         owner: String,
+        resources: SessionResources,
     ) -> Self {
         Self {
             session_manager,
             session_handle: Some(session_handle),
             owner: Some(owner),
+            resources: Some(resources),
         }
     }
 }
@@ -81,6 +92,7 @@ impl RequestInterface {
     async fn close(
         &self,
         #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(object_server)] server: &zbus::ObjectServer,
     ) -> zbus::fdo::Result<()> {
         let Some(owner) = &self.owner else {
             tracing::debug!("Request.Close called on a standalone request");
@@ -101,20 +113,104 @@ impl RequestInterface {
             .into());
         }
 
-        // If this request is associated with a session, close it
-        if let Some(session_handle) = &self.session_handle {
-            let mut manager = self.session_manager.lock().await;
-            if let Ok(handle) = zbus::ObjectPath::try_from(session_handle.as_str())
-                && manager.session_for_caller(&handle, &sender).is_ok()
-                && let Some(session) = manager.close_session(&handle)
-            {
-                tracing::info!(
-                    session_id = %session.id,
-                    "Session closed via Request.Close"
-                );
-            }
+        // If this request is associated with a session, end it the same way
+        // Session.Close does.
+        let (Some(session_handle), Some(resources)) = (&self.session_handle, &self.resources)
+        else {
+            return Ok(());
+        };
+        let Ok(handle) = ObjectPath::try_from(session_handle.as_str()) else {
+            return Ok(());
+        };
+        let mut manager = self.session_manager.lock().await;
+        if manager.get_session(&handle).is_none() {
+            return Ok(());
+        }
+        manager.session_for_caller(&handle, &sender)?;
+        let closed = manager.close_session(&handle);
+        drop(manager);
+
+        if let Some(session) = closed {
+            super::end_session(server, resources, &session, true).await;
+            tracing::info!(
+                session_id = %session.id,
+                "Session closed via Request.Close"
+            );
         }
 
         Ok(())
+    }
+}
+
+/// Keeps a `Request` object registered for the duration of one method call.
+///
+/// [`RequestGuard::register`] refuses a handle that already has a `Request`
+/// on it, so a call can't adopt or replace another call's request. The
+/// object is removed by [`RequestGuard::finish`] or, on an early return,
+/// when the guard is dropped.
+pub(crate) struct RequestGuard {
+    server: zbus::ObjectServer,
+    handle: ObjectPath<'static>,
+    armed: bool,
+}
+
+impl RequestGuard {
+    /// Register `request` at `handle`.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidArgs` if a `Request` is already registered at `handle`, and
+    /// `Failed` if the object server refuses the path.
+    pub(crate) async fn register(
+        server: &zbus::ObjectServer,
+        handle: &ObjectPath<'_>,
+        request: RequestInterface,
+    ) -> zbus::fdo::Result<Self> {
+        match server.at(handle, request).await {
+            Ok(None) => Ok(Self {
+                server: server.clone(),
+                handle: handle.clone().into_owned(),
+                armed: true,
+            }),
+            Ok(Some(_)) => {
+                tracing::warn!(handle = %handle, "Request handle is already in use");
+                Err(zbus::fdo::Error::InvalidArgs(format!(
+                    "Request handle {handle} is already in use"
+                )))
+            }
+            Err(e) => Err(zbus::fdo::Error::Failed(format!(
+                "Failed to register Request at {handle}: {e}"
+            ))),
+        }
+    }
+
+    /// Remove the `Request` object now that the call has finished.
+    pub(crate) async fn finish(mut self) {
+        self.armed = false;
+        let _ = self
+            .server
+            .remove::<RequestInterface, _>(&self.handle)
+            .await;
+    }
+}
+
+impl Drop for RequestGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // Removal is async; hand it to the runtime the call ran on.
+        let server = self.server.clone();
+        let handle = self.handle.clone();
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(async move {
+                    let _ = server.remove::<RequestInterface, _>(&handle).await;
+                });
+            }
+            Err(_) => {
+                tracing::warn!(handle = %handle, "No runtime to remove an abandoned Request object");
+            }
+        }
     }
 }

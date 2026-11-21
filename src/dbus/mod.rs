@@ -28,6 +28,7 @@ pub use input_capture::{
     InputCaptureInterface, activated_options, deactivated_options, emit_zones_changed,
 };
 pub use remote_desktop::RemoteDesktopInterface;
+pub(crate) use request::RequestGuard;
 pub use request::RequestInterface;
 pub use screencast::ScreenCastInterface;
 pub use screenshot::ScreenshotInterface;

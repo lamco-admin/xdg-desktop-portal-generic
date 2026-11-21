@@ -16,8 +16,8 @@ use tokio::sync::Mutex;
 use zbus::{Connection, ObjectPath, OwnedVariant, Variant};
 
 use super::{
-    ClipboardInterface, RemoteDesktopInterface, ScreenCastInterface, SessionInterface,
-    SessionResources,
+    ClipboardInterface, RemoteDesktopInterface, RequestInterface, ScreenCastInterface,
+    SessionInterface, SessionResources,
 };
 use crate::{
     error::Result,
@@ -37,6 +37,8 @@ const REMOTE_DESKTOP: &str = "org.freedesktop.impl.portal.RemoteDesktop";
 const SCREEN_CAST: &str = "org.freedesktop.impl.portal.ScreenCast";
 const CLIPBOARD: &str = "org.freedesktop.impl.portal.Clipboard";
 const SESSION: &str = "org.freedesktop.impl.portal.Session";
+const REQUEST: &str = "org.freedesktop.impl.portal.Request";
+const INVALID_ARGS: &str = "org.freedesktop.DBus.Error.InvalidArgs";
 const ACCESS_DENIED: &str = "org.freedesktop.DBus.Error.AccessDenied";
 const APP_ID: &str = "org.example.App";
 
@@ -312,6 +314,26 @@ impl Portal {
         .await
     }
 
+    /// Whether a `Request` object is registered at `handle`.
+    async fn request_exists(&self, handle: &str) -> bool {
+        self.server
+            .object_server()
+            .interface::<_, RequestInterface>(path(handle))
+            .await
+            .is_ok()
+    }
+
+    /// Wait up to two seconds for the `Request` at `handle` to go away.
+    async fn request_removed(&self, handle: &str) -> bool {
+        for _ in 0..100 {
+            if !self.request_exists(handle).await {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        false
+    }
+
     async fn session_exists(&self, session: &str) -> bool {
         let handle = ObjectPath::try_from(session).unwrap();
         self.session_manager
@@ -410,6 +432,39 @@ async fn select_devices(owner: &Connection, session: &str, tag: &str) {
 async fn started_remote_desktop(owner: &Connection, tag: &str) -> String {
     let session = create_remote_desktop(owner, tag).await;
     select_devices(owner, &session, tag).await;
+    let reply = call(
+        owner,
+        PATH,
+        REMOTE_DESKTOP,
+        "Start",
+        &(
+            path(&format!(
+                "/org/freedesktop/portal/desktop/request/test/{tag}_s"
+            )),
+            path(&session),
+            APP_ID,
+            "",
+            no_options(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response_code(&reply), 0);
+    session
+}
+
+/// Start a RemoteDesktop session as `owner` with one capture stream (node 101).
+async fn started_with_stream(portal: &Portal, owner: &Connection, tag: &str) -> String {
+    let session = create_remote_desktop(owner, tag).await;
+    select_devices(owner, &session, tag).await;
+    portal
+        .session_manager
+        .lock()
+        .await
+        .get_session_mut(&path(&session))
+        .unwrap()
+        .select_sources(vec![test_source(1, "eDP-1")])
+        .unwrap();
     let reply = call(
         owner,
         PATH,
@@ -577,32 +632,7 @@ async fn started_session_survives_expiry_and_close_tears_it_down() {
         return;
     };
     let owner = portal.client().await;
-    let session = create_remote_desktop(&owner, "long").await;
-    select_devices(&owner, &session, "long").await;
-    portal
-        .session_manager
-        .lock()
-        .await
-        .get_session_mut(&path(&session))
-        .unwrap()
-        .select_sources(vec![test_source(1, "eDP-1")])
-        .unwrap();
-    let reply = call(
-        &owner,
-        PATH,
-        REMOTE_DESKTOP,
-        "Start",
-        &(
-            path("/org/freedesktop/portal/desktop/request/test/long_s"),
-            path(&session),
-            APP_ID,
-            "",
-            no_options(),
-        ),
-    )
-    .await
-    .unwrap();
-    assert_eq!(response_code(&reply), 0);
+    let session = started_with_stream(&portal, &owner, "long").await;
 
     portal.backdate(&session).await;
     assert_eq!(portal.expire().await, 0);
@@ -617,4 +647,112 @@ async fn started_session_survives_expiry_and_close_tears_it_down() {
         [vec![101]]
     );
     assert!(!portal.session_object_exists(&session).await);
+}
+
+#[tokio::test]
+async fn failed_call_does_not_leave_its_request_behind() {
+    let Some(portal) = Portal::start().await else {
+        return;
+    };
+    let owner = portal.client().await;
+    let other = portal.client().await;
+    let session = create_remote_desktop(&owner, "victim").await;
+
+    // Another peer aims a call at the victim's session; it fails the sender
+    // check after its Request object was registered.
+    let handle = "/org/freedesktop/portal/desktop/request/test/stale_request";
+    let refused = call(
+        &other,
+        PATH,
+        SCREEN_CAST,
+        "SelectSources",
+        &(path(handle), path(&session), APP_ID, no_options()),
+    )
+    .await;
+    assert_eq!(error_name(&refused).as_deref(), Some(ACCESS_DENIED));
+    assert!(portal.request_removed(handle).await);
+
+    // With the Request gone there is nothing to close the victim's session through.
+    let close = call(&other, handle, REQUEST, "Close", &()).await;
+    assert!(error_name(&close).is_some());
+    assert!(portal.session_exists(&session).await);
+}
+
+#[tokio::test]
+async fn request_handle_already_in_use_is_refused() {
+    let Some(portal) = Portal::start().await else {
+        return;
+    };
+    let owner = portal.client().await;
+    let session = create_remote_desktop(&owner, "dup").await;
+
+    let handle = "/org/freedesktop/portal/desktop/request/test/dup_d";
+    let existing = RequestInterface::new(
+        Arc::clone(&portal.session_manager),
+        owner.unique_name().unwrap().to_string(),
+    );
+    assert!(
+        portal
+            .server
+            .object_server()
+            .at(path(handle), existing)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let mut options = no_options();
+    options.insert("types", Variant::from(3u32));
+    let refused = call(
+        &owner,
+        PATH,
+        REMOTE_DESKTOP,
+        "SelectDevices",
+        &(path(handle), path(&session), APP_ID, options),
+    )
+    .await;
+    assert_eq!(error_name(&refused).as_deref(), Some(INVALID_ARGS));
+    // The call didn't take over the existing request, or remove it.
+    assert!(portal.request_exists(handle).await);
+}
+
+#[tokio::test]
+async fn request_close_checks_the_sender_and_tears_down() {
+    let Some(portal) = Portal::start().await else {
+        return;
+    };
+    let owner = portal.client().await;
+    let other = portal.client().await;
+    let session = started_with_stream(&portal, &owner, "cancel").await;
+
+    let handle = "/org/freedesktop/portal/desktop/request/test/cancel_r";
+    let request = RequestInterface::for_session(
+        Arc::clone(&portal.session_manager),
+        session.clone(),
+        owner.unique_name().unwrap().to_string(),
+        portal.resources.clone(),
+    );
+    assert!(
+        portal
+            .server
+            .object_server()
+            .at(path(handle), request)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let refused = call(&other, handle, REQUEST, "Close", &()).await;
+    assert_eq!(error_name(&refused).as_deref(), Some(ACCESS_DENIED));
+    assert!(portal.session_exists(&session).await);
+    assert!(portal.recorded.destroyed_streams.lock().unwrap().is_empty());
+
+    let closed = call(&owner, handle, REQUEST, "Close", &()).await;
+    assert_eq!(error_name(&closed), None);
+    assert!(!portal.session_exists(&session).await);
+    assert!(!portal.session_object_exists(&session).await);
+    assert_eq!(
+        portal.recorded.destroyed_streams.lock().unwrap().as_slice(),
+        [vec![101]]
+    );
 }

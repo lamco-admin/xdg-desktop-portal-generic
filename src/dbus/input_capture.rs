@@ -428,7 +428,7 @@ impl InputCaptureInterface {
 
         let request_iface =
             super::RequestInterface::new(Arc::clone(&self.session_manager), sender.clone());
-        let _ = server.at(&handle, request_iface).await;
+        let request = super::RequestGuard::register(server, &handle, request_iface).await?;
 
         let persist_mode = Self::get_persist_mode(&options);
         let capabilities = get_option_u32(&options, "capabilities")
@@ -463,7 +463,7 @@ impl InputCaptureInterface {
             }
         };
 
-        let _ = server.remove::<super::RequestInterface, _>(&handle).await;
+        request.finish().await;
         result
     }
 
@@ -557,8 +557,9 @@ impl InputCaptureInterface {
             Arc::clone(&self.session_manager),
             session_handle.to_string(),
             sender.clone(),
+            self.session_resources(),
         );
-        let _ = server.at(&handle, request_iface).await;
+        let request = super::RequestGuard::register(server, &handle, request_iface).await?;
 
         let requested = Self::get_required_capabilities(&options)?;
 
@@ -606,7 +607,7 @@ impl InputCaptureInterface {
             "InputCapture session started"
         );
 
-        let _ = server.remove::<super::RequestInterface, _>(&handle).await;
+        request.finish().await;
         Ok((Response::Success.to_u32(), results))
     }
 
@@ -636,8 +637,9 @@ impl InputCaptureInterface {
             Arc::clone(&self.session_manager),
             session_handle.to_string(),
             sender.clone(),
+            self.session_resources(),
         );
-        let _ = server.at(&handle, request_iface).await;
+        let request = super::RequestGuard::register(server, &handle, request_iface).await?;
 
         {
             let manager = self.session_manager.lock().await;
@@ -654,7 +656,7 @@ impl InputCaptureInterface {
 
         let results = Self::build_zones_results(&zones, zone_set);
 
-        let _ = server.remove::<super::RequestInterface, _>(&handle).await;
+        request.finish().await;
         Ok((Response::Success.to_u32(), results))
     }
 
@@ -690,8 +692,9 @@ impl InputCaptureInterface {
             Arc::clone(&self.session_manager),
             session_handle.to_string(),
             sender.clone(),
+            self.session_resources(),
         );
-        let _ = server.at(&handle, request_iface).await;
+        let request = super::RequestGuard::register(server, &handle, request_iface).await?;
 
         let mut manager = self.session_manager.lock().await;
         Self::validate_input_capture_session(&manager, &session_handle, app_id, &sender)?;
@@ -719,7 +722,7 @@ impl InputCaptureInterface {
             owned_value_from_u32_array(failed_barriers),
         );
 
-        let _ = server.remove::<super::RequestInterface, _>(&handle).await;
+        request.finish().await;
         Ok((Response::Success.to_u32(), results))
     }
 

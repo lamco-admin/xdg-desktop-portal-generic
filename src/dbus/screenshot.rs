@@ -69,7 +69,7 @@ impl ScreenshotInterface {
 
         // Register Request object at handle path for cancellation support
         let request_iface = super::RequestInterface::standalone();
-        let _ = server.at(&handle, request_iface).await;
+        let request = super::RequestGuard::register(server, &handle, request_iface).await?;
 
         // Get the first available source (primary monitor)
         let output_id = {
@@ -122,7 +122,7 @@ impl ScreenshotInterface {
         }
 
         // Remove Request object after method completes
-        let _ = server.remove::<super::RequestInterface, _>(&handle).await;
+        request.finish().await;
 
         Ok((Response::Success.to_u32(), results))
     }
@@ -145,7 +145,7 @@ impl ScreenshotInterface {
 
         // Register Request object at handle path for cancellation support
         let request_iface = super::RequestInterface::standalone();
-        let _ = server.at(&handle, request_iface).await;
+        let request = super::RequestGuard::register(server, &handle, request_iface).await?;
 
         // Get the first available source
         let output_id = {
@@ -195,7 +195,7 @@ impl ScreenshotInterface {
         }
 
         // Remove Request object after method completes
-        let _ = server.remove::<super::RequestInterface, _>(&handle).await;
+        request.finish().await;
 
         Ok((Response::Success.to_u32(), results))
     }
