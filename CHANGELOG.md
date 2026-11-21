@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-11-21
+
+### Breaking
+
+- **With no source picker, every ScreenCast request is cancelled.** A
+  backend without `XDP_GENERIC_SOURCE_PICKER` used to capture the first
+  output without asking. It now answers `Response::Cancelled` unless the new
+  setting `XDP_GENERIC_AUTO_SELECT=first` is set (see Security below).
+- **`restore_data` is version 2**, `("generic", 2, <token>)`. Version 1
+  restore data is ignored, so applications that persisted a cast ask the
+  user once more. `RestoreData` holds the token in place of
+  `output_names`.
+- **API:** `SessionInterface::new` takes a `SessionResources` in place of
+  the four backend handles. `RequestInterface::new` and `for_session` take
+  the calling peer, and `for_session` also takes `SessionResources`.
+  `PendingWriteEntry` gains `session_handle`.
+
+### Upgrading from 1.x
+
+- A desktop that relied on the backend picking the first output by itself
+  needs either a source picker (`XDP_GENERIC_SOURCE_PICKER`) or
+  `XDP_GENERIC_AUTO_SELECT=first` in the backend's environment, for example
+  in its systemd user unit. Without one of them, screen sharing is refused.
+  Set `XDP_GENERIC_AUTO_SELECT=first` only where capturing without asking is
+  acceptable, such as a kiosk or a test machine.
+- Code that builds `SessionInterface`, `RequestInterface`, `RestoreData` or
+  `PendingWriteEntry` itself needs the new arguments and fields above. A
+  consumer that only embeds the backends and doesn't run
+  `PortalBackend::run` is otherwise unaffected.
+
 ### Security
 
 These apply to the D-Bus portal service. A consumer that embeds the
@@ -64,14 +94,6 @@ backends and doesn't run `PortalBackend::run` isn't affected by them.
   Without it, a backend with no source picker cancels every ScreenCast
   request. `XDP_GENERIC_SOURCE_PICKER` and `XDP_GENERIC_AUTO_SELECT` are
   read once at startup; the picker used to be read on every request.
-- **`restore_data` is version 2**, `("generic", 2, <token>)`. Version 1
-  restore data is ignored, so applications that persisted a cast ask the
-  user once more. `RestoreData` holds the token in place of
-  `output_names`.
-- **API:** `SessionInterface::new` takes a `SessionResources` in place of
-  the four backend handles. `RequestInterface::new` and `for_session` take
-  the calling peer, and `for_session` also takes `SessionResources`.
-  `PendingWriteEntry` gains `session_handle`.
 - The pipe reads and writes behind `SelectionWrite` and `SelectionRead`
   run on blocking threads, so a client that never closes its end no longer
   holds an async worker.
