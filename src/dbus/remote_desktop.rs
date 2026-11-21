@@ -380,6 +380,16 @@ impl RemoteDesktopInterface {
             .get_session_mut(&session_handle)
             .ok_or_else(|| PortalError::SessionNotFound(session_handle.to_string()))?;
 
+        // Refuse a second Start, or one on a session that can't start, before
+        // creating anything: a refused Start must not leave a capture running.
+        if !session.can_start() {
+            return Err(PortalError::InvalidState {
+                expected: "Init with devices or sources selected".to_string(),
+                actual: session.state.to_string(),
+            }
+            .into());
+        }
+
         let device_bits = session.device_types.to_bits();
         let sources_selected = session.sources_selected;
         let clipboard_enabled = session.clipboard_enabled;
@@ -397,7 +407,12 @@ impl RemoteDesktopInterface {
             vec![]
         };
 
-        session.start(streams.clone())?;
+        if let Err(e) = session.start(streams.clone()) {
+            self.session_resources()
+                .release_streams(streams.iter().map(|s| s.node_id).collect())
+                .await;
+            return Err(e.into());
+        }
 
         // If we created capture streams, set up stream-to-output mappings
         // for multi-monitor absolute pointer positioning.

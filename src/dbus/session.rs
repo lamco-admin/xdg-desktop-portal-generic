@@ -57,6 +57,21 @@ impl SessionResources {
         }
     }
 
+    /// Stop the captures behind `stream_ids` and destroy their PipeWire
+    /// streams.
+    pub async fn release_streams(&self, stream_ids: Vec<u32>) {
+        if stream_ids.is_empty() {
+            return;
+        }
+        let mut capture = self.capture_backend.lock().await;
+        let _ = capture.destroy_capture_session(&stream_ids);
+        drop(capture);
+
+        for node_id in stream_ids {
+            let _ = self.pipewire_manager.destroy_stream(node_id).await;
+        }
+    }
+
     /// Release everything `session` holds in the backends: its input
     /// context, its captures and PipeWire streams, and any InputCapture
     /// barrier surfaces.
@@ -69,16 +84,7 @@ impl SessionResources {
         let _ = input.destroy_context(&session_id);
         drop(input);
 
-        if !session.streams.is_empty() {
-            let stream_ids = session.stream_ids();
-            let mut capture = self.capture_backend.lock().await;
-            let _ = capture.destroy_capture_session(&stream_ids);
-            drop(capture);
-
-            for node_id in stream_ids {
-                let _ = self.pipewire_manager.destroy_stream(node_id).await;
-            }
-        }
+        self.release_streams(session.stream_ids()).await;
 
         if session.is_input_capture_session
             && let Some(tx) = &self.input_capture_tx

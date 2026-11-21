@@ -86,6 +86,7 @@ struct Recorded {
     injected: Arc<StdMutex<Vec<(String, InputEvent)>>>,
     destroyed_contexts: Arc<StdMutex<Vec<String>>>,
     destroyed_streams: Arc<StdMutex<Vec<Vec<u32>>>>,
+    captures_created: Arc<StdMutex<usize>>,
 }
 
 struct MockInput(Recorded);
@@ -157,6 +158,7 @@ impl CaptureBackend for MockCapture {
         sources: &[SourceInfo],
         _cursor_mode: CursorMode,
     ) -> Result<Vec<StreamInfo>> {
+        *self.recorded.captures_created.lock().unwrap() += 1;
         Ok(sources
             .iter()
             .map(|s| StreamInfo {
@@ -1022,4 +1024,54 @@ async fn restore_data_is_honoured_only_for_a_grant_the_backend_issued() {
     again.insert("restore_data", Variant::from(restore_data));
     let (_, code) = screen_cast_select(&owner, "again", APP_ID, again).await;
     assert_eq!(code, 1);
+}
+
+#[tokio::test]
+async fn second_start_creates_no_capture() {
+    let Some(portal) = Portal::start().await else {
+        return;
+    };
+    let owner = portal.client().await;
+    let captures = || *portal.recorded.captures_created.lock().unwrap();
+
+    let remote = started_with_stream(&portal, &owner, "rd_twice").await;
+    assert_eq!(captures(), 1);
+    let again = call(
+        &owner,
+        PATH,
+        REMOTE_DESKTOP,
+        "Start",
+        &(
+            path("/org/freedesktop/portal/desktop/request/test/rd_twice_s2"),
+            path(&remote),
+            APP_ID,
+            "",
+            no_options(),
+        ),
+    )
+    .await;
+    assert!(error_name(&again).is_some());
+    assert_eq!(captures(), 1);
+
+    portal.set_source_selection(None, AutoSelect::First).await;
+    let (cast, code) = screen_cast_select(&owner, "sc_twice", APP_ID, no_options()).await;
+    assert_eq!(code, 0);
+    screen_cast_start(&owner, &cast, "sc_twice", APP_ID).await;
+    assert_eq!(captures(), 2);
+    let again = call(
+        &owner,
+        PATH,
+        SCREEN_CAST,
+        "Start",
+        &(
+            path("/org/freedesktop/portal/desktop/request/test/sc_twice_st2"),
+            path(&cast),
+            APP_ID,
+            "",
+            no_options(),
+        ),
+    )
+    .await;
+    assert!(error_name(&again).is_some());
+    assert_eq!(captures(), 2);
 }

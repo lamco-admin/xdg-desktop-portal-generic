@@ -428,6 +428,16 @@ impl ScreenCastInterface {
             .into());
         }
 
+        // Refuse a second Start, or one on a session that can't start, before
+        // creating anything: a refused Start must not leave a capture running.
+        if !session.can_start() {
+            return Err(PortalError::InvalidState {
+                expected: "Init".to_string(),
+                actual: session.state.to_string(),
+            }
+            .into());
+        }
+
         let sources = session.sources.clone();
         let persist_mode = session.persist_mode;
 
@@ -440,7 +450,12 @@ impl ScreenCastInterface {
         drop(backend);
 
         // Start the session with streams
-        session.start(streams.clone())?;
+        if let Err(e) = session.start(streams.clone()) {
+            self.session_resources()
+                .release_streams(streams.iter().map(|s| s.node_id).collect())
+                .await;
+            return Err(e.into());
+        }
 
         let mut results = Self::build_stream_results(&streams);
 
