@@ -1075,3 +1075,54 @@ async fn second_start_creates_no_capture() {
     assert!(error_name(&again).is_some());
     assert_eq!(captures(), 2);
 }
+
+#[tokio::test]
+async fn out_of_range_codes_and_foreign_streams_are_refused() {
+    let Some(portal) = Portal::start().await else {
+        return;
+    };
+    let owner = portal.client().await;
+    let other = portal.client().await;
+    let session = started_with_stream(&portal, &owner, "codes").await;
+    let other_session = started_with_stream(&portal, &other, "codes_other").await;
+    let injected = || portal.recorded.injected.lock().unwrap().len();
+
+    for keycode in [-1i32, 768, i32::MAX] {
+        let body = (path(&session), no_options(), keycode, 1u32);
+        let refused = call(&owner, PATH, REMOTE_DESKTOP, "NotifyKeyboardKeycode", &body).await;
+        assert_eq!(error_name(&refused).as_deref(), Some(INVALID_ARGS));
+    }
+    let body = (path(&session), no_options(), -5i32, 1u32);
+    let refused = call(&owner, PATH, REMOTE_DESKTOP, "NotifyPointerButton", &body).await;
+    assert_eq!(error_name(&refused).as_deref(), Some(INVALID_ARGS));
+    assert_eq!(injected(), 0);
+
+    // Both sessions have a stream 101, so use one neither has.
+    let body = (path(&session), no_options(), 999u32, 0.5f64, 0.5f64);
+    let refused = call(
+        &owner,
+        PATH,
+        REMOTE_DESKTOP,
+        "NotifyPointerMotionAbsolute",
+        &body,
+    )
+    .await;
+    assert_eq!(error_name(&refused).as_deref(), Some(INVALID_ARGS));
+    assert_eq!(injected(), 0);
+
+    let body = (path(&session), no_options(), 101u32, 0.5f64, 0.5f64);
+    let allowed = call(
+        &owner,
+        PATH,
+        REMOTE_DESKTOP,
+        "NotifyPointerMotionAbsolute",
+        &body,
+    )
+    .await;
+    assert_eq!(error_name(&allowed), None);
+    let body = (path(&session), no_options(), 0x110i32, 1u32);
+    let allowed = call(&owner, PATH, REMOTE_DESKTOP, "NotifyPointerButton", &body).await;
+    assert_eq!(error_name(&allowed), None);
+    assert_eq!(injected(), 2);
+    assert!(portal.session_exists(&other_session).await);
+}

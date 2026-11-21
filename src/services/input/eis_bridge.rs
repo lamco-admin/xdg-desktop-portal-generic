@@ -34,7 +34,7 @@ use reis::request::EisRequest;
 /// 4-step validation guard). reis 0.7's `EisRequestConverter` does not apply
 /// this itself, so it's enforced here at the point untrusted wire values
 /// become our internal `InputEvent`.
-const EVDEV_KEY_CNT: u32 = 768;
+pub(crate) const EVDEV_KEY_CNT: u32 = 768;
 
 /// Reject a button code or keycode outside the evdev range, logging why.
 /// `kind` is only used for the log message ("button" / "keycode").

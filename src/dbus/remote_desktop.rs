@@ -26,7 +26,7 @@ use crate::{
     pipewire::PipeWireManager,
     services::{
         capture::CaptureBackend,
-        input::{InputBackend, InputProtocol},
+        input::{EVDEV_KEY_CNT, InputBackend, InputProtocol},
     },
     session::{PersistMode, SessionManager},
     types::{
@@ -121,13 +121,14 @@ impl RemoteDesktopInterface {
     ///
     /// Refuses a caller other than the peer that created the session, a
     /// session that hasn't been started (input before `Start` would skip the
-    /// consent the frontend asks for there), and a device type the session
-    /// didn't select.
+    /// consent the frontend asks for there), a device type the session
+    /// didn't select, and a `stream` that isn't one of the session's own.
     async fn authorize_input(
         &self,
         session_handle: &ObjectPath<'_>,
         header: &zbus::message::Header<'_>,
         device: InputDevice,
+        stream: Option<u32>,
     ) -> zbus::fdo::Result<String> {
         let sender = super::caller(header)?;
         let manager = self.session_manager.lock().await;
@@ -144,6 +145,14 @@ impl RemoteDesktopInterface {
             return Err(
                 PortalError::PermissionDenied(format!("{} not enabled", device.name())).into(),
             );
+        }
+        if let Some(stream) = stream
+            && !session.streams.iter().any(|s| s.node_id == stream)
+        {
+            return Err(PortalError::InvalidArgument(format!(
+                "Stream {stream} does not belong to session {session_handle}"
+            ))
+            .into());
         }
 
         Ok(session_handle.to_string())
@@ -613,7 +622,7 @@ impl RemoteDesktopInterface {
         );
 
         let session_id = self
-            .authorize_input(&session_handle, &header, InputDevice::Pointer)
+            .authorize_input(&session_handle, &header, InputDevice::Pointer, None)
             .await?;
 
         let mut backend = self.input_backend.lock().await;
@@ -654,7 +663,7 @@ impl RemoteDesktopInterface {
         );
 
         let session_id = self
-            .authorize_input(&session_handle, &header, InputDevice::Pointer)
+            .authorize_input(&session_handle, &header, InputDevice::Pointer, Some(stream))
             .await?;
 
         let mut backend = self.input_backend.lock().await;
@@ -681,10 +690,6 @@ impl RemoteDesktopInterface {
     /// # Errors
     ///
     /// Returns `zbus::fdo::Error` if the session is not found or pointer is not enabled.
-    #[expect(
-        clippy::cast_sign_loss,
-        reason = "D-Bus sends button as i32 but kernel button codes are u32"
-    )]
     #[zbus(name = "NotifyPointerButton")]
     async fn notify_pointer_button(
         &self,
@@ -703,14 +708,15 @@ impl RemoteDesktopInterface {
         );
 
         let session_id = self
-            .authorize_input(&session_handle, &header, InputDevice::Pointer)
+            .authorize_input(&session_handle, &header, InputDevice::Pointer, None)
             .await?;
+        let button = evdev_code(button, "button")?;
 
         let mut backend = self.input_backend.lock().await;
         backend.inject_event(
             &session_id,
             InputEvent::Pointer(PointerEvent::Button {
-                button: button as u32,
+                button,
                 state: ButtonState::from_dbus(state),
                 time_usec: current_time_usec(),
             }),
@@ -744,7 +750,7 @@ impl RemoteDesktopInterface {
         );
 
         let session_id = self
-            .authorize_input(&session_handle, &header, InputDevice::Pointer)
+            .authorize_input(&session_handle, &header, InputDevice::Pointer, None)
             .await?;
 
         let mut backend = self.input_backend.lock().await;
@@ -793,7 +799,7 @@ impl RemoteDesktopInterface {
         );
 
         let session_id = self
-            .authorize_input(&session_handle, &header, InputDevice::Pointer)
+            .authorize_input(&session_handle, &header, InputDevice::Pointer, None)
             .await?;
 
         let mut backend = self.input_backend.lock().await;
@@ -814,10 +820,6 @@ impl RemoteDesktopInterface {
     /// # Errors
     ///
     /// Returns `zbus::fdo::Error` if the session is not found or keyboard is not enabled.
-    #[expect(
-        clippy::cast_sign_loss,
-        reason = "D-Bus sends keycode as i32 but XKB keycodes are u32"
-    )]
     #[zbus(name = "NotifyKeyboardKeycode")]
     async fn notify_keyboard_keycode(
         &self,
@@ -836,14 +838,15 @@ impl RemoteDesktopInterface {
         );
 
         let session_id = self
-            .authorize_input(&session_handle, &header, InputDevice::Keyboard)
+            .authorize_input(&session_handle, &header, InputDevice::Keyboard, None)
             .await?;
+        let keycode = evdev_code(keycode, "keycode")?;
 
         let mut backend = self.input_backend.lock().await;
         backend.inject_event(
             &session_id,
             InputEvent::Keyboard(KeyboardEvent {
-                keycode: keycode as u32,
+                keycode,
                 state: KeyState::from_dbus(state),
                 time_usec: current_time_usec(),
             }),
@@ -880,7 +883,7 @@ impl RemoteDesktopInterface {
         );
 
         let session_id = self
-            .authorize_input(&session_handle, &header, InputDevice::Keyboard)
+            .authorize_input(&session_handle, &header, InputDevice::Keyboard, None)
             .await?;
 
         let mut backend = self.input_backend.lock().await;
@@ -939,7 +942,12 @@ impl RemoteDesktopInterface {
         );
 
         let session_id = self
-            .authorize_input(&session_handle, &header, InputDevice::Touchscreen)
+            .authorize_input(
+                &session_handle,
+                &header,
+                InputDevice::Touchscreen,
+                Some(stream),
+            )
             .await?;
 
         let mut backend = self.input_backend.lock().await;
@@ -992,7 +1000,12 @@ impl RemoteDesktopInterface {
         );
 
         let session_id = self
-            .authorize_input(&session_handle, &header, InputDevice::Touchscreen)
+            .authorize_input(
+                &session_handle,
+                &header,
+                InputDevice::Touchscreen,
+                Some(stream),
+            )
             .await?;
 
         let mut backend = self.input_backend.lock().await;
@@ -1035,7 +1048,7 @@ impl RemoteDesktopInterface {
         );
 
         let session_id = self
-            .authorize_input(&session_handle, &header, InputDevice::Touchscreen)
+            .authorize_input(&session_handle, &header, InputDevice::Touchscreen, None)
             .await?;
 
         let mut backend = self.input_backend.lock().await;
@@ -1086,6 +1099,20 @@ impl RemoteDesktopInterface {
     }
 }
 
+/// Convert a keycode or button code from a `Notify*` call to an evdev code.
+///
+/// Refuses negative codes and codes at or past `KEY_CNT`, the same bound the
+/// EIS path applies to its codes.
+fn evdev_code(code: i32, kind: &str) -> zbus::fdo::Result<u32> {
+    u32::try_from(code)
+        .ok()
+        .filter(|&code| code < EVDEV_KEY_CNT)
+        .ok_or_else(|| {
+            tracing::warn!(kind, code, "D-Bus input code out of evdev range, refused");
+            PortalError::InvalidArgument(format!("{kind} {code} is outside the evdev range")).into()
+        })
+}
+
 /// Get current monotonic time in microseconds.
 ///
 /// Uses `CLOCK_MONOTONIC` per the xdg-desktop-portal spec for input event
@@ -1100,5 +1127,21 @@ fn current_time_usec() -> u64 {
     match clock_gettime(ClockId::CLOCK_MONOTONIC) {
         Ok(ts) => ts.tv_sec() as u64 * 1_000_000 + ts.tv_nsec() as u64 / 1_000,
         Err(_) => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_evdev_code_range() {
+        assert_eq!(evdev_code(0, "keycode").unwrap(), 0);
+        assert_eq!(evdev_code(30, "keycode").unwrap(), 30);
+        assert_eq!(evdev_code(0x110, "button").unwrap(), 0x110);
+        assert_eq!(evdev_code(767, "keycode").unwrap(), 767);
+        assert!(evdev_code(768, "keycode").is_err());
+        assert!(evdev_code(-1, "button").is_err());
+        assert!(evdev_code(i32::MAX, "keycode").is_err());
     }
 }

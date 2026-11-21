@@ -33,6 +33,7 @@ use std::{os::unix::io::OwnedFd, path::PathBuf, sync::Arc};
 
 pub use detection::{AvailableProtocols, ProtocolDetector};
 pub use eis_backend::EisSession;
+pub(crate) use eis_bridge::EVDEV_KEY_CNT;
 pub use eis_bridge::EisBridgeBackend;
 pub use wlr_backend::WlrInputBackend;
 
