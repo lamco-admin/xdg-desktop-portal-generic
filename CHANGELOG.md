@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+These apply to the D-Bus portal service. A consumer that embeds the
+backends and doesn't run `PortalBackend::run` isn't affected by them.
+
+- **Only the peer that created a session may act on it.** The
+  RemoteDesktop `Notify*` methods, `ScreenCast.OpenPipeWireRemote`,
+  `Session.Close`, `Request.Close` and the Clipboard methods found the
+  session by its path alone, and session paths can be read by
+  introspecting the backend. Any peer on the bus could inject input into
+  another peer's session, take a PipeWire connection for it, close it, or
+  answer its pastes. Each now compares the caller with the session's
+  creator and refuses anyone else with `AccessDenied`. `Notify*` also
+  refuses a session that hasn't been started.
+- **Started sessions no longer expire.** Activity was never recorded, so
+  every started session was dropped 10 minutes after it was created, and
+  the cleanup left its capture, PipeWire streams and input context running
+  with no owner. Started sessions now last until `Session.Close` or their
+  owner leaves the bus. Sessions that never start still expire, and every
+  way a session ends releases its resources the same way.
+- **Clipboard transfers go only to the selection owner.** A transfer went
+  to every session with the clipboard enabled, and whichever answered
+  first supplied the pasted data. Only the session whose `SetSelection` is
+  current is asked now, and `SelectionWrite` and `SelectionWriteDone`
+  refuse a serial that wasn't issued to the caller.
+- **Request objects don't outlive a failed call.** A call that failed its
+  checks left its Request registered, and closing that Request removed the
+  session it named from the manager without stopping anything. Requests are
+  removed on every return path, a handle already in use is refused, and
+  `Request.Close` checks the caller and ends the session properly.
+- **A second `Start` creates no capture.** It used to create one before
+  finding the session already started, leaving a capture nothing stopped.
+- **`NotifyKeyboardKeycode` and `NotifyPointerButton` refuse codes outside
+  the evdev range**, as the EIS path does, and the absolute pointer and
+  touch methods refuse a stream id that isn't the session's own.
 - **A ScreenCast request captures only what someone chose.** With no
   `XDP_GENERIC_SOURCE_PICKER`, `SelectSources` used to capture the first
   output without asking, and a picker that exited non-zero or printed
@@ -35,6 +68,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restore data is ignored, so applications that persisted a cast ask the
   user once more. `RestoreData` holds the token in place of
   `output_names`.
+- **API:** `SessionInterface::new` takes a `SessionResources` in place of
+  the four backend handles. `RequestInterface::new` and `for_session` take
+  the calling peer, and `for_session` also takes `SessionResources`.
+  `PendingWriteEntry` gains `session_handle`.
+- The pipe reads and writes behind `SelectionWrite` and `SelectionRead`
+  run on blocking threads, so a client that never closes its end no longer
+  holds an async worker.
 
 ## [1.3.0] - 2026-11-19
 
