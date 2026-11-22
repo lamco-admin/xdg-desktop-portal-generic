@@ -580,24 +580,27 @@ pub(super) fn restore_data_value(token: &str) -> Option<OwnedVariant> {
 /// What `SelectSources` selects when no picker is configured.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum AutoSelect {
-    /// Select nothing, so the request is cancelled. The default: capturing
-    /// the screen without anyone choosing to is not something to fall into.
-    #[default]
+    /// Select nothing, so the request is cancelled (`XDP_GENERIC_AUTO_SELECT=none`): every
+    /// screen cast then needs a picker.
     Disabled,
-    /// Select the first source (`XDP_GENERIC_AUTO_SELECT=first`).
+    /// Select the first source. The default, as in 1.x and as xdg-desktop-portal-wlr does with
+    /// no chooser: whoever runs the backend without a picker has chosen that.
+    #[default]
     First,
 }
 
 impl AutoSelect {
-    /// Parse a `XDP_GENERIC_AUTO_SELECT` value.
+    /// Parse a `XDP_GENERIC_AUTO_SELECT` value. A value it doesn't know turns auto-select off,
+    /// since whoever set one meant something other than the default.
     fn parse(value: Option<&str>) -> Self {
         match value.map(str::trim) {
-            None | Some("") => Self::Disabled,
-            Some("first") => Self::First,
+            None | Some("" | "first") => Self::First,
+            Some("none") => Self::Disabled,
             Some(other) => {
                 tracing::warn!(
                     value = other,
-                    "Unknown XDP_GENERIC_AUTO_SELECT value (expected \"first\"), auto-select stays off"
+                    "Unknown XDP_GENERIC_AUTO_SELECT value (expected \"first\" or \"none\"), \
+                     auto-select is off"
                 );
                 Self::Disabled
             }
@@ -645,12 +648,12 @@ enum SourceSelection {
 /// - `XDP_GENERIC_SOURCE_PICKER`: path to an external source picker tool.
 ///   The tool receives source names (one per line) on stdin and should write
 ///   the selected source name(s) to stdout (one per line).
-/// - `XDP_GENERIC_AUTO_SELECT=first`: with no picker configured, select the
-///   first source without asking.
+/// - `XDP_GENERIC_AUTO_SELECT`: with no picker configured, `first` (the
+///   default) selects the first source without asking and `none` cancels.
 ///
 /// A picker that exits with a non-zero status, can't be started, or selects
-/// nothing cancels the request; so does having neither a picker nor
-/// auto-select. Auto-select is never a fallback for a picker.
+/// nothing cancels the request; so does having no picker with auto-select
+/// set to `none`. Auto-select is never a fallback for a picker.
 ///
 /// # Multi-select
 ///
@@ -695,7 +698,8 @@ fn select_sources_interactively(
         (AutoSelect::First, Some(first)) => {
             tracing::info!(
                 source = %first.name,
-                "No source picker configured, XDP_GENERIC_AUTO_SELECT=first selects the first source"
+                "No source picker configured, so the first source is selected \
+                 (XDP_GENERIC_AUTO_SELECT=none asks for a picker instead)"
             );
             SourceSelection::Selected(vec![first.clone()])
         }
@@ -703,7 +707,7 @@ fn select_sources_interactively(
         (AutoSelect::Disabled, _) => {
             tracing::warn!(
                 "No source picker configured (XDP_GENERIC_SOURCE_PICKER) and auto-select is off \
-                 (XDP_GENERIC_AUTO_SELECT), so the screen cast request is cancelled"
+                 (XDP_GENERIC_AUTO_SELECT=none), so the screen cast request is cancelled"
             );
             SourceSelection::Cancelled
         }
@@ -885,9 +889,12 @@ mod tests {
 
     #[test]
     fn test_auto_select_parse() {
-        assert_eq!(AutoSelect::parse(None), AutoSelect::Disabled);
-        assert_eq!(AutoSelect::parse(Some("")), AutoSelect::Disabled);
+        // Unset selects the first source, as 1.x did.
+        assert_eq!(AutoSelect::parse(None), AutoSelect::First);
+        assert_eq!(AutoSelect::parse(Some("")), AutoSelect::First);
+        assert_eq!(AutoSelect::default(), AutoSelect::First);
         assert_eq!(AutoSelect::parse(Some("first")), AutoSelect::First);
+        assert_eq!(AutoSelect::parse(Some("none")), AutoSelect::Disabled);
         assert_eq!(AutoSelect::parse(Some("yes")), AutoSelect::Disabled);
     }
 

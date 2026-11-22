@@ -178,7 +178,7 @@ All configuration is via environment variables, set before the service starts
 | Variable | Value | Description |
 |----------|-------|-------------|
 | `XDP_GENERIC_SOURCE_PICKER` | path to executable | External tool for ScreenCast source selection UI |
-| `XDP_GENERIC_AUTO_SELECT` | `first` | With no source picker configured, select the first source without asking (default: unset, cancel) |
+| `XDP_GENERIC_AUTO_SELECT` | `first`, `none` | With no source picker configured: `first` (the default) selects the first source without asking, `none` cancels the request |
 | `XDP_GENERIC_COLOR_PICKER` | path to executable | External tool for Screenshot color picking |
 
 #### Choosing What a Screen Cast Captures
@@ -187,11 +187,10 @@ A ScreenCast request captures only what the user chose. The backend asks
 the source picker. If the picker exits with a non-zero status, can't be
 started, or outputs nothing that names a source, the request is cancelled.
 
-With no source picker configured, the request is cancelled too, unless
-`XDP_GENERIC_AUTO_SELECT=first` is set, in which case the first source is
-captured without asking. Set it only where every application that can reach
-the portal may see that screen, such as a single-purpose kiosk or a test
-machine. A cancelled picker never falls back to it.
+With no source picker configured, the first source is captured without asking,
+as in 1.x. Set `XDP_GENERIC_AUTO_SELECT=none` to have such requests cancelled
+instead, so that every screen cast needs a picker. A cancelled picker never
+falls back to the first source.
 
 An application that asked to persist its cast (`persist_mode` 1 or 2) gets
 back restore data it can present on a later request to skip the picker. The

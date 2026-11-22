@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-11-21
+
+### Fixed
+
+- **With no source picker, the first source is captured again, as in 1.x.**
+  2.0.0 cancelled every ScreenCast request on a backend without
+  `XDP_GENERIC_SOURCE_PICKER` unless `XDP_GENERIC_AUTO_SELECT=first` was set,
+  so screen sharing stopped for anyone running it without a picker. Unset
+  `XDP_GENERIC_AUTO_SELECT` selects the first source again, and the new value
+  `none` cancels such requests, for a desktop where every screen cast should
+  go through a picker. A picker that is cancelled, fails or selects nothing
+  still cancels the request, which was the consent problem 2.0.0 fixed.
+
 ## [2.0.0] - 2026-11-21
 
 ### Breaking
