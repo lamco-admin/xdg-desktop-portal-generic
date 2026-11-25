@@ -431,9 +431,9 @@ dependencies = [
 
 [[package]]
 name = "lamco-data-control"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
- "nix 0.31.3",
+ "nix 0.32.0",
  "thiserror",
  "tracing",
  "wayland-client",
@@ -595,9 +595,9 @@ dependencies = [
 
 [[package]]
 name = "nix"
-version = "0.31.3"
+version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
+checksum = "77730ed34f01f4990cb2ea67fec715ecebc6fab9a6396cf83c5529b13f581bdc"
 dependencies = [
  "bitflags",
  "cfg-if",
@@ -1385,7 +1385,7 @@ dependencies = [
 
 [[package]]
 name = "xdg-desktop-portal-generic"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "anyhow",
  "enumflags2",
@@ -1394,7 +1394,7 @@ dependencies = [
  "lamco-data-control",
  "libc",
  "libspa",
- "nix 0.31.3",
+ "nix 0.32.0",
  "pipewire",
  "png",
  "reis",

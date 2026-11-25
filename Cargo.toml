@@ -39,7 +39,7 @@ expect_used = "warn"
 
 [package]
 name = "xdg-desktop-portal-generic"
-version = "2.0.1"
+version = "2.0.2"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
@@ -111,7 +111,7 @@ xkbcommon = { version = "0.9", features = ["wayland"] }
 png = "0.18"
 
 # System
-nix = { version = "0.31", features = ["socket", "poll", "fs", "mman", "time"] }
+nix = { version = ">=0.31, <0.33", features = ["socket", "poll", "fs", "mman", "time"] }
 libc = "0.2"
 
 # Optional: kernel-level input injection via /dev/uinput

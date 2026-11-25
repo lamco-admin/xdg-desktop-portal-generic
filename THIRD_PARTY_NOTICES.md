@@ -1521,8 +1521,8 @@ SOFTWARE.
 ## MIT License
 
 Used by:
-- xdg-desktop-portal-generic 2.0.1
-- lamco-data-control 1.0.1
+- xdg-desktop-portal-generic 2.0.2
+- lamco-data-control 1.0.2
 
 ```
 MIT License
@@ -1842,7 +1842,7 @@ THE SOFTWARE.
 
 Used by:
 - nix 0.29.0
-- nix 0.31.3
+- nix 0.32.0
 
 ```
 The MIT License (MIT)

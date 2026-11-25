@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.2] - 2026-11-25
+
+### Changed
+
+- **`nix` 0.32 is accepted as well as 0.31** (`>=0.31, <0.33`), here and in
+  lamco-data-control 1.0.2, so a build that already carries either doesn't get
+  a second copy. The released binary is built with 0.32.
+
 ## [2.0.1] - 2026-11-21
 
 ### Fixed

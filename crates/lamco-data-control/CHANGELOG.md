@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.2] - 2026-11-25
+
+### Changed
+- `nix` 0.32 is accepted as well as 0.31 (`>=0.31, <0.33`), so a build that already carries
+  either doesn't get a second copy. No code change.
+
 ## [1.0.1] - 2026-09-30
 
 ### Changed

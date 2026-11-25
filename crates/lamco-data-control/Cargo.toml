@@ -1,6 +1,6 @@
 [package]
 name = "lamco-data-control"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2024"
 authors = ["Greg Lamberson <greg@lamco.io>"]
 rust-version = "1.87"
@@ -34,7 +34,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
-nix = { version = "0.31", features = ["fs", "poll"] }
+nix = { version = ">=0.31, <0.33", features = ["fs", "poll"] }
 thiserror = "2.0"
 tracing = "0.1"
 
