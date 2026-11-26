@@ -1521,7 +1521,7 @@ SOFTWARE.
 ## MIT License
 
 Used by:
-- xdg-desktop-portal-generic 2.0.2
+- xdg-desktop-portal-generic 2.0.3
 - lamco-data-control 1.0.2
 
 ```
