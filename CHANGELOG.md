@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A change of output mode no longer ends every capture (ext-image-copy-capture).**
+  When an output changed its mode while a frame was pending, the compositor
+  sent the new buffer constraints and the backend created the next frame
+  without destroying the pending one. A capture session takes one frame at a
+  time, so the compositor answered with the `duplicate_frame` protocol error,
+  which closes the whole Wayland connection: every capture stopped and stayed
+  stopped. Seen on Hyprland 0.56, where a resize from a remote client left the
+  picture at its old size. The pending frame is now destroyed first.
+
 ## [2.0.2] - 2026-11-25
 
 ### Changed

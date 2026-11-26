@@ -413,6 +413,19 @@ impl ExtCaptureState {
             return;
         }
 
+        // New constraints can arrive while a frame is still pending: an output that changes its
+        // mode sends them before it fails the frame it was drawing (Hyprland 0.56). That frame
+        // was made for the old size, and a session takes one frame at a time: creating the next
+        // beside it is the duplicate_frame protocol error, which ends the whole Wayland
+        // connection and with it every capture. So it goes first, before its buffer does.
+        if let Some(stale) = capture.pending_frame.take() {
+            tracing::debug!(
+                node_id,
+                "Dropping the frame pending under the old constraints"
+            );
+            stale.destroy();
+        }
+
         let Some(format) = capture.constraints.pick_format() else {
             tracing::error!(node_id, "No suitable SHM format in ext capture constraints");
             if let Some(reply) = capture.screenshot_reply.take() {
@@ -741,6 +754,12 @@ impl ExtCaptureState {
 
         if capture.stopped {
             return;
+        }
+
+        // One frame at a time (see `allocate_and_capture`): nothing may still be pending here,
+        // and if something is, it must not be left for the compositor to find.
+        if let Some(stale) = capture.pending_frame.take() {
+            stale.destroy();
         }
 
         // Create next frame and attach existing buffer
